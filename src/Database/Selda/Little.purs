@@ -3,7 +3,7 @@ module Database.Selda.Little where
 import Prelude
 
 import Control.Monad.State (class MonadState, State, get, put, runState)
-import Data.Array (reverse, (:))
+import Data.Array (elem, filter, reverse, (:))
 import Data.Foldable (fold)
 import Data.Leibniz (type (~))
 import Data.Monoid (mempty)
@@ -36,11 +36,11 @@ type GenState =
   }
 
 state2sql :: GenState -> Select
+state2sql { sources: [sql] } = -- | XXX: should take restricts also
+  sql -- {restricts = restricts sql ++ srs}
 state2sql { sources }  =
   Select { columns: allCols sources, source: Product sources }
   -- SQL (allCols ss) (Product ss) srs [] [] Nothing False
--- state2sql [sql] srs _ _ _) =
---   sql {restricts = restricts sql ++ srs}
 
 allCols :: Array Select -> Array (SomeCol Select)
 allCols sqls = do
@@ -202,20 +202,67 @@ instance finalColsCol ∷ FinalCols (Col s a) where
   finalCols (Col c) = [Some (unsafeCoerce c)]
 
 compQuery ∷ ∀ a s. (FinalCols a) ⇒ Scope → Query s a → Tuple Int Select
-compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [sql] })
+compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs] })
   where
   Tuple cs st = runQuery ns q
   final = finalCols cs
   sql = state2sql st
-  --   live = colNames final ++ allNonOutputColNames sql
-  --   srcs = removeDeadCols live sql
+  live = colNames final <> allNonOutputColNames sql
+  srcs = removeDeadCols live sql
 
--- colNames :: [SomeCol SQL] -> [ColName]
--- colNames cs = concat
---   [ [n | Some c <- cs, n <- allNamesIn c]
---   , [n | Named _ c <- cs, n <- allNamesIn c]
---   , [n | Named n _ <- cs]
---   ]
+type SomeCol' = SomeCol Select
+type ColName = String
+
+allNonOutputColNames :: Select -> Array String
+allNonOutputColNames (Select sql) = fold
+  [ -- concatMap allNamesIn (restricts sql)
+  --  colNames (sql.groups)
+  -- , colNames (map snd $ ordering sql)
+   case sql.source of
+      -- Join _ on _ _ -> allNamesIn on
+      _             -> []
+  ]
+
+removeDeadCols :: Array String -> Select -> Select
+removeDeadCols live sql =
+  case sql'.source of
+    -- EmptyTable      -> sql'
+    TableName _     -> Select sql'
+    -- Values  _ _     -> sql'
+    Product qs      -> Select (sql' {source = Product $ map noDead qs})
+    -- Join jt on l r  -> sql' {source = Join jt on (noDead l) (noDead r)}
+  where
+  Select sql' = keepCols (allNonOutputColNames sql <> live) sql
+  live' = allColNames (Select sql')
+  noDead = removeDeadCols live'
+
+keepCols :: Array String -> Select -> Select
+keepCols live (Select s@{ columns }) = (Select $ s {columns = filtered})
+  where
+  filtered = filter (_ `oneOf` live) columns
+  -- oneOf (Some (AggrEx _ _)) _    = True
+  -- oneOf (Named _ (AggrEx _ _)) _ = True
+  oneOf (Some (Column n)) ns        = n `elem` ns
+  oneOf (Named n _) ns           = n `elem` ns
+  oneOf _ _                      = false
+
+allColNames :: Select -> Array String
+allColNames (sql@(Select { columns })) = colNames columns <> allNonOutputColNames sql
+
+colNames :: Array SomeCol' -> Array ColName
+colNames cs = do
+  c ← cs
+  case c of
+    Some c → allNamesIn c
+    Named n c → n : allNamesIn c
+
+
+allNamesIn :: forall a s. Exp s a -> Array String
+allNamesIn (TableCol ns) = ns
+allNamesIn (Column n) = [n]
+allNamesIn (Lit _) = []
+allNamesIn (BinaryIntOp { e1, e2 }) = allNamesIn e1 <> allNamesIn e2
+
 
 sqlFrom ∷ Array (SomeCol Select) → SqlSource → Select
 sqlFrom cs src = Select
