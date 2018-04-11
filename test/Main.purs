@@ -10,11 +10,11 @@ import Data.Tuple (Tuple(..))
 import Database.Selda.Little (BinOp(..), BinOpExp(..), Col(..), Exp(..), Lit(..), Query(..), Table(..), compQuery, ppSql, restrict, runQuery, select, state2sql)
 import Debug.Trace (traceAnyA)
 
-people ∷ Table "people" (firstName ∷ String, lastName ∷ String, age ∷ Int)
-people = Table
+people ∷ Table (firstName ∷ String, lastName ∷ String, age ∷ Int)
+people = Table "people"
 
-vegs ∷ Table "vegs" (colour ∷ String, weight ∷ Int)
-vegs = Table
+vegs ∷ Table (colour ∷ String, weight ∷ Int)
+vegs = Table "vegs"
 
 gt (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (Gt { cmp: (>) , o: id }) e1 $ e2
 lt (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (Lt { cmp: (<) , o: id }) e1 $ e2

@@ -18,7 +18,7 @@ import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..
 import Type.Row (Cons, Nil, kind RowList)
 import Unsafe.Coerce (unsafeCoerce)
 
-data Table (name ∷ Symbol) (r ∷ # Type) = Table
+data Table (r ∷ # Type) = Table String
 
 type Scope = Int
 type Ident = Int
@@ -152,15 +152,12 @@ newtype Col s a = Col (Exp Select a)
 newtype Cols s (r ∷ # Type) = Cols (Record r)
 
 select
-  ∷ ∀ c cl cs name s
-  . IsSymbol name
-  ⇒ RowToList c cl
+  ∷ ∀ c cl cs s
+  . RowToList c cl
   ⇒ QueryCols s cl cs
-  ⇒ Table name c
+  ⇒ Table c
   → Query s (Record cs)
-select _ = do
-  let
-    name = reflectSymbol (SProxy ∷ SProxy name)
+select (Table name) = do
   { result, cols } ← colsImpl (RLProxy ∷ RLProxy cl)
   st ← Query get
   Query (put $ st { sources = sqlFrom cols (TableName name) [] : st.sources })
