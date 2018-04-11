@@ -13,17 +13,24 @@ import Debug.Trace (traceAnyA)
 people ∷ Table "people" (firstName ∷ String, lastName ∷ String, age ∷ Int)
 people = Table
 
-gt e1 e2 = BinOpExp (Gt { cmp: (>) , o: id }) e1 e2
+vegs ∷ Table "vegs" (colour ∷ String, weight ∷ Int)
+vegs = Table
+
+gt (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (Gt { cmp: (>) , o: id }) e1 $ e2
+lt (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (Lt { cmp: (<) , o: id }) e1 $ e2
+eq (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (Eq { eq: (==) , o: id }) e1 $ e2
+and (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (And { i: id, o: id }) e1 $ e2
+lInt x = Col (Lit (LInt x id))
+lStr x = Col (Lit (LString x id))
 
 -- query :: forall t3.  Query t3 _ -- { age ∷ Col t3 Int }
 query = do
   { firstName, age } ← select people
-  x age
-  pure firstName
+  { colour } ← select vegs
+  restrict $ (age `gt` lInt 10) `and` (age `lt` lInt 20)
+  restrict $ colour `eq` lStr "red"
+  pure { firstName, colour }
 
--- x :: forall t77. Exp Select Int -> Query t77 Unit
-x (Col age) = do
-  restrict (Col (BinaryOp $ mkExists (gt age (Lit (LInt 8 id)))))
 
 main :: forall e. Eff (console :: CONSOLE | e) Unit
 main = do

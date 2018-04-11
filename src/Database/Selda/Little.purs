@@ -306,7 +306,7 @@ sqlFrom cs src restricts = Select
 type TableName = String
 
 data Lit a
-  = LText String (String ~ a)
+  = LString String (String ~ a)
   | LInt Int (Int ~ a)
   | LBool Boolean (Boolean ~ a)
   -- | LNull ∷ SqlType a ⇒ Lit (Maybe a)
