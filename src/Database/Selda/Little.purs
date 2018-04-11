@@ -3,9 +3,11 @@ module Database.Selda.Little where
 import Prelude
 
 import Control.Monad.State (class MonadState, State, get, put, runState)
-import Data.Array (elem, filter, reverse, (:))
-import Data.Foldable (fold)
+import Data.Array (any, catMaybes, elem, filter, reverse, (:))
+import Data.Exists (Exists, runExists)
+import Data.Foldable (fold, foldMap)
 import Data.Leibniz (type (~))
+import Data.Maybe (Maybe(..))
 import Data.Monoid (mempty)
 import Data.Record as Data.Record
 import Data.String (joinWith)
@@ -29,23 +31,22 @@ instance showName ∷ Show Name where
 
 type GenState =
   { sources ∷ Array Select
-  -- , staticRestricts ∷ Array (Exp Select Bool)
+  , staticRestricts ∷ Array (Exp Select Boolean)
   , groupCols ∷ Array (SomeCol Select)
   , nameSupply ∷ Int
   , nameScope ∷ Int
   }
 
-state2sql :: GenState -> Select
-state2sql { sources: [sql] } = -- | XXX: should take restricts also
-  sql -- {restricts = restricts sql ++ srs}
-state2sql { sources }  =
-  Select { columns: allCols sources, source: Product sources }
-  -- SQL (allCols ss) (Product ss) srs [] [] Nothing False
+state2sql ∷ GenState → Select
+state2sql { sources: [Select sql], staticRestricts } =
+  Select (sql { restricts = sql.restricts <> staticRestricts })
+state2sql { sources, staticRestricts }  =
+  Select { columns: allCols sources, source: Product sources, restricts: staticRestricts }
 
-allCols :: Array Select -> Array (SomeCol Select)
+allCols ∷ Array Select → Array (SomeCol Select)
 allCols sqls = do
-  Select sql <- sqls
-  col <- sql.columns
+  Select sql ← sqls
+  col ← sql.columns
   pure (outCol col)
   where
     outCol (Named n _) = Some (Column n)
@@ -67,25 +68,26 @@ data SqlSource
 
 data JoinType = InnerJoin | LeftJoin
 
-data BinOperator i a = BinOperator
-
 data Exp sql a
   = Column String
   | TableCol (Array String)
-  | BinaryIntOp { op ∷ BinOp a, e1 ∷ Exp sql Int, e2 ∷ Exp sql Int }
+  -- | BinaryIntOp { op ∷ BinOp a, e1 ∷ Exp sql Int, e2 ∷ Exp sql Int }
+  | BinaryOp (Exists (BinOpExp sql a))
   -- BinOp   ∷ !(BinOp a b) → !(Exp sql a) → !(Exp sql a) → Exp sql b
   | Lit (Lit a)
   -- | Fun2 Text (Exp sql i1) (Exp sql i2)
 
-data BinOp b
-  = Gt (b ~ Boolean)
-  -- Lt    ∷ BinOp a Bool
-  -- Gte   ∷ BinOp a Bool
-  -- Lte   ∷ BinOp a Bool
-  -- Eq    ∷ BinOp a Bool
-  -- Neq   ∷ BinOp a Bool
-  -- And   ∷ BinOp Bool Bool
-  -- Or    ∷ BinOp Bool Bool
+data BinOpExp sql o i = BinOpExp (BinOp sql i o) (Exp sql i) (Exp sql i)
+
+data BinOp sql i o
+  = Gt { cmp ∷ i → i → Boolean, o ∷ Boolean ~ o }
+  | Lt { cmp ∷ i → i → Boolean, o ∷ Boolean ~ o }
+  | Gte { cmp ∷ i → i → Boolean, o ∷ Boolean ~ o }
+  | Lte { cmp ∷ i → i → Boolean, o ∷ Boolean ~ o }
+  | Eq { eq ∷ i → i → Boolean, o ∷ Boolean ~ o }
+  | Neq { nEq ∷ i → i → Boolean, o ∷ Boolean ~ o }
+  | And { i ∷ Boolean ~ i, o ∷ Boolean ~ o }
+  | Or { i ∷ Boolean ~ i, o ∷ Boolean ~ o }
   -- Add   ∷ BinOp a a
   -- Sub   ∷ BinOp a a
   -- Mul   ∷ BinOp a a
@@ -93,13 +95,14 @@ data BinOp b
   -- Like  ∷ BinOp Text Bool
 
 data SomeCol sql
+  -- | Move to `Exists`
   = Some (∀ a. Exp sql a)
   | Named String (∀ a. Exp sql a)
 
-data Select = Select
+newtype Select = Select
   { columns ∷ Array (SomeCol Select)
   , source ∷ SqlSource
---   -- , restricts ∷ [Exp SQL Bool]
+  , restricts ∷ Array (Exp Select Boolean)
 --   -- , groups    ∷ ![SomeCol SQL]
 --   -- , ordering  ∷ ![(Order, SomeCol SQL)]
 --   -- , limits    ∷ !(Maybe (Int, Int))
@@ -160,16 +163,39 @@ select _ = do
     name = reflectSymbol (SProxy ∷ SProxy name)
   { result, cols } ← colsImpl (RLProxy ∷ RLProxy cl)
   st ← Query get
-  Query (put $ st { sources = sqlFrom cols (TableName name) : st.sources })
+  Query (put $ st { sources = sqlFrom cols (TableName name) [] : st.sources })
   pure result
 
-runQuery :: ∀ a s. Scope -> Query s a -> Tuple a GenState
+restrict ∷ ∀ s. Col s Boolean → Query s Unit
+restrict (Col p) = Query $ do
+  st ← get
+  put $ case st.sources of
+    [] ->
+      st { staticRestricts = p : st.staticRestricts }
+    -- PostgreSQL doesn't put renamed columns in scope in the WHERE clause
+    -- of the query where they are renamed, so if the restrict predicate
+    -- contains any vars renamed in this query, we must add another query
+    -- just for the restrict.
+    [Select sql] | not (p `wasRenamedIn` sql.columns) ->
+      st {sources = [Select $ sql { restricts = p : sql.restricts }]}
+    ss ->
+      st { sources = [ sqlFrom (allCols ss) (Product ss) [p] ]}
+  where
+  wasRenamedIn ∷ ∀ a sql. Exp sql a → Array (SomeCol sql) → Boolean
+  wasRenamedIn predicate cs =
+    let
+      cs' = catMaybes <<< flip map cs $ case _ of
+        Named n _ → Just n
+        _ → Nothing
+    in  any (_ `elem` cs') (colNames [Some (unsafeCoerce predicate)])
+
+runQuery ∷ ∀ a s. Scope → Query s a → Tuple a GenState
 runQuery scope (Query query) = runState query (initState scope)
 
-initState :: Int -> GenState
+initState ∷ Int → GenState
 initState scope =
   { sources: []
-  -- , staticRestricts: []
+  , staticRestricts: []
   , groupCols: []
   , nameSupply: 0
   , nameScope: scope
@@ -202,7 +228,7 @@ instance finalColsCol ∷ FinalCols (Col s a) where
   finalCols (Col c) = [Some (unsafeCoerce c)]
 
 compQuery ∷ ∀ a s. (FinalCols a) ⇒ Scope → Query s a → Tuple Int Select
-compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs] })
+compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs], restricts: [] })
   where
   Tuple cs st = runQuery ns q
   final = finalCols cs
@@ -213,30 +239,30 @@ compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [
 type SomeCol' = SomeCol Select
 type ColName = String
 
-allNonOutputColNames :: Select -> Array String
+allNonOutputColNames ∷ Select → Array String
 allNonOutputColNames (Select sql) = fold
-  [ -- concatMap allNamesIn (restricts sql)
+  [ foldMap allNamesIn sql.restricts
   --  colNames (sql.groups)
   -- , colNames (map snd $ ordering sql)
-   case sql.source of
-      -- Join _ on _ _ -> allNamesIn on
-      _             -> []
+  , case sql.source of
+      -- Join _ on _ _ → allNamesIn on
+      _             → []
   ]
 
-removeDeadCols :: Array String -> Select -> Select
+removeDeadCols ∷ Array String → Select → Select
 removeDeadCols live sql =
   case sql'.source of
-    -- EmptyTable      -> sql'
-    TableName _     -> Select sql'
-    -- Values  _ _     -> sql'
-    Product qs      -> Select (sql' {source = Product $ map noDead qs})
-    -- Join jt on l r  -> sql' {source = Join jt on (noDead l) (noDead r)}
+    -- EmptyTable      → sql'
+    TableName _     → Select sql'
+    -- Values  _ _     → sql'
+    Product qs      → Select (sql' {source = Product $ map noDead qs})
+    -- Join jt on l r  → sql' {source = Join jt on (noDead l) (noDead r)}
   where
   Select sql' = keepCols (allNonOutputColNames sql <> live) sql
   live' = allColNames (Select sql')
   noDead = removeDeadCols live'
 
-keepCols :: Array String -> Select -> Select
+keepCols ∷ Array String → Select → Select
 keepCols live (Select s@{ columns }) = (Select $ s {columns = filtered})
   where
   filtered = filter (_ `oneOf` live) columns
@@ -246,10 +272,10 @@ keepCols live (Select s@{ columns }) = (Select $ s {columns = filtered})
   oneOf (Named n _) ns           = n `elem` ns
   oneOf _ _                      = false
 
-allColNames :: Select -> Array String
+allColNames ∷ Select → Array String
 allColNames (sql@(Select { columns })) = colNames columns <> allNonOutputColNames sql
 
-colNames :: Array SomeCol' -> Array ColName
+colNames ∷ ∀ sql. Array (SomeCol sql) → Array ColName
 colNames cs = do
   c ← cs
   case c of
@@ -257,18 +283,18 @@ colNames cs = do
     Named n c → n : allNamesIn c
 
 
-allNamesIn :: forall a s. Exp s a -> Array String
+allNamesIn ∷ forall a s. Exp s a → Array String
 allNamesIn (TableCol ns) = ns
 allNamesIn (Column n) = [n]
 allNamesIn (Lit _) = []
-allNamesIn (BinaryIntOp { e1, e2 }) = allNamesIn e1 <> allNamesIn e2
+allNamesIn (BinaryOp e) = runExists (\(BinOpExp _ e1 e2) → allNamesIn e1 <> allNamesIn e2) e
 
 
-sqlFrom ∷ Array (SomeCol Select) → SqlSource → Select
-sqlFrom cs src = Select
+sqlFrom ∷ Array (SomeCol Select) → SqlSource → Array (Exp Select Boolean) → Select
+sqlFrom cs src restricts = Select
   { columns: cs
   , source: src
-  -- , restricts = []
+  , restricts: restricts
   -- , groups = []
   -- , ordering = []
   -- , limits = Nothing
@@ -326,9 +352,9 @@ ppCol ∷ ∀ a. Exp Select a → PP String
 ppCol (TableCol xs) = unsafeCrashWith $ "Selda: compiler bug: ppCol saw TableCol..."
 ppCol (Column name) = pure name
 ppCol (Lit l) = ppLit l
-ppCol (BinaryIntOp {op, e1, e2}) = ppBinOp op e1 e2
+ppCol (BinaryOp e) = runExists (\(BinOpExp op e1 e2) → ppBinOp op e1 e2) e
 
-ppBinOp ∷ ∀ a o. BinOp o → Exp Select a → Exp Select a → PP String
+ppBinOp ∷ ∀ a o sql. BinOp Select a o → Exp Select a → Exp Select a → PP String
 ppBinOp op a b = do
     a' ← ppCol a
     b' ← ppCol b
@@ -339,13 +365,13 @@ ppBinOp op a b = do
     paren _ c = "(" <> c <> ")"
 
     ppOp (Gt _) = ">"
---     -- ppOp Lt    = "<"
---     -- ppOp Gte   = ">="
---     -- ppOp Lte   = "<="
---     -- ppOp Eq    = "="
---     -- ppOp Neq   = "!="
---     -- ppOp And   = "AND"
---     -- ppOp Or    = "OR"
+    ppOp (Lt _) = "<"
+    ppOp (Gte _) = ">="
+    ppOp (Lte _) = "<="
+    ppOp (Eq _) = "="
+    ppOp (Neq _) = "!="
+    ppOp (And _) = "AND"
+    ppOp (Or _) = "OR"
 --     -- ppOp Add   = "+"
 --     -- ppOp Sub   = "-"
 --     -- ppOp Mul   = "*"
@@ -368,14 +394,14 @@ ppSql ∷ Select → PP String
 ppSql (Select q) = do
   columns ← traverse ppSomeCol q.columns
   source ← ppSrc q.source
-  -- r' ← ppRestricts r
+  r' ← ppRestricts q.restricts 
   -- gs' ← ppGroups gs
   -- ord' ← ppOrder ord
   -- lim' ← ppLimit lim
   pure $ fold
     [ "SELECT ", result columns
     , source
-    -- , r'
+    , r'
     -- , gs'
     -- , ord'
     -- , lim'
@@ -395,6 +421,15 @@ ppSql (Select q) = do
       qn ← freshQueryName
       pure (q <> " AS " <> qn)
     pure $ " FROM " <> joinWith ", " qs
+
+  ppRestricts [] = pure ""
+  ppRestricts rs = ppCols rs >>= \rs' → pure $ " WHERE " <> rs'
+
+  ppCols ∷ Array (Exp Select Boolean) → PP String
+  ppCols cs = do
+    cs' ← traverse ppCol (reverse cs)
+    pure $ "(" <> joinWith ") AND (" cs' <> ")"
+
 --     ppSrc EmptyTable = do
 --       qn ← freshQueryName
 --       pure $ " FROM (SELECT NULL LIMIT 0) AS " <> qn
@@ -426,9 +461,6 @@ ppSql (Select q) = do
 --     ppRow xs = do
 --       ls ← sequence [ppLit l | Param l ← xs]
 --       pure $ Text.intercalate ", " ls
--- 
---     ppRestricts [] = pure ""
---     ppRestricts rs = ppCols rs >>= \rs' → pure $ " WHERE " <> rs'
 -- 
 --     ppGroups [] = pure ""
 --     ppGroups grps = do
