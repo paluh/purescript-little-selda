@@ -2,17 +2,18 @@ module Database.Selda.Little where
 
 import Prelude
 
-import Control.Monad.State (class MonadState, State, get, put, runState)
+import Control.Monad.State (class MonadState, State, get, modify, put, runState)
 import Data.Array (any, catMaybes, elem, filter, reverse, (:))
-import Data.Exists (Exists, runExists)
+import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (fold, foldMap)
 import Data.Leibniz (type (~))
 import Data.Maybe (Maybe(..))
 import Data.Monoid (mempty)
 import Data.Record as Data.Record
 import Data.String (joinWith)
-import Data.Traversable (for, traverse)
+import Data.Traversable (for, sequence, traverse)
 import Data.Tuple (Tuple(..))
+import Debug.Trace (traceAnyA)
 import Partial.Unsafe (unsafeCrashWith)
 import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..), SProxy(..), reflectSymbol)
 import Type.Row (Cons, Nil, kind RowList)
@@ -41,7 +42,7 @@ state2sql ∷ GenState → Select
 state2sql { sources: [Select sql], staticRestricts } =
   Select (sql { restricts = sql.restricts <> staticRestricts })
 state2sql { sources, staticRestricts }  =
-  Select { columns: allCols sources, source: Product sources, restricts: staticRestricts }
+  Select { columns: allCols sources, source: Product sources, restricts: staticRestricts, groups: [] }
 
 allCols ∷ Array Select → Array (SomeCol Select)
 allCols sqls = do
@@ -55,6 +56,7 @@ allCols sqls = do
 
 newtype Query s a = Query (State GenState a)
 derive newtype instance functorQuery ∷ Functor (Query s)
+derive newtype instance applyQuery ∷ Apply (Query s)
 derive newtype instance applicativeQuery ∷ Applicative (Query s)
 derive newtype instance bindQuery ∷ Bind (Query s)
 derive newtype instance monadQuery ∷ Monad (Query s)
@@ -74,8 +76,11 @@ data Exp sql a
   -- | BinaryIntOp { op ∷ BinOp a, e1 ∷ Exp sql Int, e2 ∷ Exp sql Int }
   | BinaryOp (Exists (BinOpExp sql a))
   -- BinOp   ∷ !(BinOp a b) → !(Exp sql a) → !(Exp sql a) → Exp sql b
-  | Lit (Lit a)
+  | Literal (Lit a)
   -- | Fun2 Text (Exp sql i1) (Exp sql i2)
+  | Aggregate (Exists (AggrExp sql a))
+
+data AggrExp sql o i = AggrExp String (Exp sql i)
 
 data BinOpExp sql o i = BinOpExp (BinOp sql i o) (Exp sql i) (Exp sql i)
 
@@ -94,6 +99,14 @@ data BinOp sql i o
   -- Div   ∷ BinOp a a
   -- Like  ∷ BinOp Text Bool
 
+data UnOp a b
+  = Fun String
+  -- Abs    ∷ UnOp a a
+  -- Not    ∷ UnOp Bool Bool
+  -- Neg    ∷ UnOp a a
+  -- Sgn    ∷ UnOp a a
+  -- IsNull ∷ UnOp (Maybe a) Bool
+
 data SomeCol sql
   -- | Move to `Exists`
   = Some (∀ a. Exp sql a)
@@ -103,7 +116,7 @@ newtype Select = Select
   { columns ∷ Array (SomeCol Select)
   , source ∷ SqlSource
   , restricts ∷ Array (Exp Select Boolean)
---   -- , groups    ∷ ![SomeCol SQL]
+  , groups ∷ Array (SomeCol Select)
 --   -- , ordering  ∷ ![(Order, SomeCol SQL)]
 --   -- , limits    ∷ !(Maybe (Int, Int))
 --   -- , distinct  ∷ !Bool
@@ -121,6 +134,8 @@ freshName = do
   n ← freshId
   pure $ "tmp_" <> show n
 
+-- XXX: We probably want to process some input record
+--      with some isos here (dbType ←→ psType)
 class QueryCols s (rl ∷ RowList) (r ∷ # Type) | s rl → r where
   colsImpl ∷ ∀ sql. RLProxy rl → Query s { result ∷ (Record r), cols ∷ Array (SomeCol sql) }
 
@@ -163,6 +178,93 @@ select (Table name) = do
   Query (put $ st { sources = sqlFrom cols (TableName name) [] : st.sources })
   pure result
 
+
+-- rename :: SomeCol sql -> State GenState (SomeCol sql)
+-- rename (Some col) = do
+--     n <- freshId
+--     return $ Named (newName n) col
+--   where
+--     newName ns =
+--       case col of
+--         Col n -> addColSuffix n $ "_" <> pack (show ns)
+--         _     -> mkColName $ "tmp_" <> pack (show ns)
+-- rename col@(Named _ _) = do
+--   return col
+
+
+class Rename s (il ∷ RowList) (i ∷ # Type) (o ∷ # Type) | il i → o where
+  renameImpl ∷ RLProxy il → Record i → Query s { result ∷ Record o, cols ∷ Array (SomeCol Select) }
+
+instance nilRename ∷ Rename s Nil r () where
+  renameImpl _ _ = pure { result: {}, cols: [] }
+
+instance consRename
+  ∷ ( Rename s tail r o'
+    , IsSymbol name
+    , RowCons name (Col s a) r' r
+    , RowLacks name o'
+    , RowCons name (Col s a) o' o
+    )
+  ⇒ Rename s (Cons name (Col s a) tail) r o
+  where
+  renameImpl _ r = do
+    i ← Query freshId
+    let
+      Col col = Data.Record.get _name r
+      name = reflectSymbol _name
+      name' = name <> "_" <> show i
+    { result, cols } ← renameImpl (RLProxy ∷ RLProxy tail) r
+    let
+      result' = Data.Record.insert _name (Col (Column name')) result
+      cols' = Named name' (unsafeCoerce col) : cols
+    pure { result: result', cols: cols' }
+    where
+    _name = SProxy ∷ SProxy name
+
+aggregate
+  ∷ ∀ a al c cl cs s
+  . RowToList a al
+  ⇒ Aggregates al a c
+  ⇒ RowToList c cl
+  ⇒ Rename s cl c cs
+  ⇒ Query (Inner s) (Record a)
+  → Query s (Record cs)
+aggregate q = do
+  { genState, a: aggrs } ← Query $ isolate q
+  traceAnyA aggrs
+  traceAnyA genState
+  { result, cols } ← renameImpl (RLProxy ∷ RLProxy cl) $ unAggrs (RLProxy ∷ RLProxy al) aggrs
+  traceAnyA cols
+  let
+    sql = sqlFrom' cols (Product [state2sql genState]) _{ groups = genState.groupCols }
+  Query (modify $ \st → st {sources = sql : st.sources })
+  pure result
+
+class Aggregates (il ∷ RowList) (i ∷ # Type) (o ∷ # Type) | il i → o where
+  unAggrs ∷ RLProxy il → Record i → Record o
+
+instance a_aggregatesNil ∷ Aggregates Nil r () where
+  unAggrs _ _ = {}
+
+instance b_aggregatesCons
+  ∷ ( Aggregates tail r o'
+    , RowLacks name o'
+    , RowLacks name r'
+    , IsSymbol name
+    , RowCons name (Aggr (Inner s) a) r' r
+    , RowCons name (Col s a) o' o
+    )
+  ⇒ Aggregates (Cons name (Aggr (Inner s) a) tail) r o
+  where
+  unAggrs _ r =
+    let
+      _name = SProxy ∷ SProxy name
+      Aggr a = Data.Record.get _name r
+      u = unAggrs (RLProxy ∷ RLProxy tail) r
+    in
+      Data.Record.insert _name (Col a) u
+
+
 restrict ∷ ∀ s. Col s Boolean → Query s Unit
 restrict (Col p) = Query $ do
   st ← get
@@ -185,6 +287,34 @@ restrict (Col p) = Query $ do
         Named n _ → Just n
         _ → Nothing
     in  any (_ `elem` cs') (colNames [Some (unsafeCoerce predicate)])
+
+isolate ∷ ∀ a s. Query s a → State GenState {genState ∷ GenState, a ∷ a}
+isolate (Query q) = do
+  st ← get
+  put $ (initState st.nameScope) { nameSupply = st.nameSupply }
+  a ← q
+  genState ← get
+  put $ st { nameSupply = genState.nameSupply }
+  pure { genState, a }
+
+data Inner s
+newtype Aggr s a = Aggr (Exp Select a)
+
+aggr ∷ ∀ a b s. String → Col s a → Aggr s b
+aggr f (Col col) = Aggr (Aggregate (mkExists (AggrExp f col)))
+
+count ∷ ∀ a s. Col s a → Aggr s Int
+count = aggr "COUNT"
+
+-- | Sum all values in the given column.
+sum_ ∷ ∀ s. Col s Int → Aggr s Int
+sum_ = aggr "SUM"
+
+groupBy ∷ ∀ a s. Col (Inner s) a → Query (Inner s) (Aggr (Inner s) a)
+groupBy (Col c) = Query $ do
+  st ← get
+  put $ st { groupCols = Some (unsafeCoerce c) : st.groupCols }
+  pure (Aggr c)
 
 runQuery ∷ ∀ a s. Scope → Query s a → Tuple a GenState
 runQuery scope (Query query) = runState query (initState scope)
@@ -225,7 +355,7 @@ instance finalColsCol ∷ FinalCols (Col s a) where
   finalCols (Col c) = [Some (unsafeCoerce c)]
 
 compQuery ∷ ∀ a s. (FinalCols a) ⇒ Scope → Query s a → Tuple Int Select
-compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs], restricts: [] })
+compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs], restricts: [], groups: [] })
   where
   Tuple cs st = runQuery ns q
   final = finalCols cs
@@ -239,7 +369,7 @@ type ColName = String
 allNonOutputColNames ∷ Select → Array String
 allNonOutputColNames (Select sql) = fold
   [ foldMap allNamesIn sql.restricts
-  --  colNames (sql.groups)
+  , colNames (sql.groups)
   -- , colNames (map snd $ ordering sql)
   , case sql.source of
       -- Join _ on _ _ → allNamesIn on
@@ -260,14 +390,14 @@ removeDeadCols live sql =
   noDead = removeDeadCols live'
 
 keepCols ∷ Array String → Select → Select
-keepCols live (Select s@{ columns }) = (Select $ s {columns = filtered})
+keepCols live (Select s@{ columns }) = Select $ s {columns = filtered}
   where
   filtered = filter (_ `oneOf` live) columns
-  -- oneOf (Some (AggrEx _ _)) _    = True
-  -- oneOf (Named _ (AggrEx _ _)) _ = True
-  oneOf (Some (Column n)) ns        = n `elem` ns
-  oneOf (Named n _) ns           = n `elem` ns
-  oneOf _ _                      = false
+  oneOf (Some (Aggregate _)) _ = true
+  oneOf (Named _ (Aggregate _)) _ = true
+  oneOf (Some (Column n)) ns = n `elem` ns
+  oneOf (Named n _) ns = n `elem` ns
+  oneOf _ _  = false
 
 allColNames ∷ Select → Array String
 allColNames (sql@(Select { columns })) = colNames columns <> allNonOutputColNames sql
@@ -283,8 +413,11 @@ colNames cs = do
 allNamesIn ∷ forall a s. Exp s a → Array String
 allNamesIn (TableCol ns) = ns
 allNamesIn (Column n) = [n]
-allNamesIn (Lit _) = []
+allNamesIn (Literal _) = []
 allNamesIn (BinaryOp e) = runExists (\(BinOpExp _ e1 e2) → allNamesIn e1 <> allNamesIn e2) e
+allNamesIn (Aggregate e) = runExists (\(AggrExp _ x) → allNamesIn x) e
+
+sqlFrom' columns source f = Select $ f { columns, source, restricts: [], groups: [] }
 
 
 sqlFrom ∷ Array (SomeCol Select) → SqlSource → Array (Exp Select Boolean) → Select
@@ -292,7 +425,7 @@ sqlFrom cs src restricts = Select
   { columns: cs
   , source: src
   , restricts: restricts
-  -- , groups = []
+  , groups: []
   -- , ordering = []
   -- , limits = Nothing
   -- , distinct = False
@@ -348,8 +481,20 @@ escapeQuotes = id -- replace (Pattern "\"") "\"\""
 ppCol ∷ ∀ a. Exp Select a → PP String
 ppCol (TableCol xs) = unsafeCrashWith $ "Selda: compiler bug: ppCol saw TableCol..."
 ppCol (Column name) = pure name
-ppCol (Lit l) = ppLit l
+ppCol (Literal l) = ppLit l
 ppCol (BinaryOp e) = runExists (\(BinOpExp op e1 e2) → ppBinOp op e1 e2) e
+ppCol (Aggregate e) = runExists (\(AggrExp f x) → ppUnOp (Fun f) x) e
+
+ppUnOp ∷ ∀ a b. UnOp a b → Exp Select a → PP String
+ppUnOp op c = do
+  c' ← ppCol c
+  pure $ case op of
+    Fun f  → f <> "(" <> c' <> ")"
+    -- Abs    → "ABS(" <> c' <> ")"
+    -- Sgn    → "SIGN(" <> c' <> ")"
+    -- Neg    → "-(" <> c' <> ")"
+    -- Not    → "NOT(" <> c' <> ")"
+    -- IsNull → "(" <> c' <> ") IS NULL"
 
 ppBinOp ∷ ∀ a o sql. BinOp Select a o → Exp Select a → Exp Select a → PP String
 ppBinOp op a b = do
@@ -358,7 +503,7 @@ ppBinOp op a b = do
     pure $ paren a a' <> " " <> ppOp op <> " " <> paren b b'
   where
     paren (Column _) c = c
-    paren (Lit _) c = c
+    paren (Literal _) c = c
     paren _ c = "(" <> c <> ")"
 
     ppOp (Gt _) = ">"
@@ -392,14 +537,14 @@ ppSql (Select q) = do
   columns ← traverse ppSomeCol q.columns
   source ← ppSrc q.source
   r' ← ppRestricts q.restricts 
-  -- gs' ← ppGroups gs
+  gs' ← ppGroups q.groups
   -- ord' ← ppOrder ord
   -- lim' ← ppLimit lim
   pure $ fold
     [ "SELECT ", result columns
     , source
     , r'
-    -- , gs'
+    , gs'
     -- , ord'
     -- , lim'
     ]
@@ -426,6 +571,14 @@ ppSql (Select q) = do
   ppCols cs = do
     cs' ← traverse ppCol (reverse cs)
     pure $ "(" <> joinWith ") AND (" cs' <> ")"
+
+  ppGroups [] = pure ""
+  ppGroups grps = do
+    cls ← sequence (catMaybes <<< flip map grps $ case _ of
+      Some c → Just (ppCol c)
+      _ → Nothing)
+    pure $ " GROUP BY " <> joinWith ", " cls
+
 
 --     ppSrc EmptyTable = do
 --       qn ← freshQueryName
@@ -458,11 +611,6 @@ ppSql (Select q) = do
 --     ppRow xs = do
 --       ls ← sequence [ppLit l | Param l ← xs]
 --       pure $ Text.intercalate ", " ls
--- 
---     ppGroups [] = pure ""
---     ppGroups grps = do
---       cls ← sequence [ppCol c | Some c ← grps]
---       pure $ " GROUP BY " <> Text.intercalate ", " cls
 -- 
 --     ppOrder [] = pure ""
 --     ppOrder os = do
