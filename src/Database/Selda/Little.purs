@@ -2,13 +2,12 @@ module Database.Selda.Little where
 
 import Prelude
 
-import Control.Monad.State (class MonadState, State, get, modify, put, runState)
+import Control.Monad.State (State, get, modify, put, runState)
 import Data.Array (any, catMaybes, elem, filter, reverse, (:))
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (fold, foldMap)
 import Data.Leibniz (type (~))
 import Data.Maybe (Maybe(..))
-import Data.Monoid (mempty)
 import Data.Record as Data.Record
 import Data.String (joinWith)
 import Data.Traversable (for, sequence, traverse)
@@ -136,64 +135,46 @@ freshName = do
 
 -- XXX: We probably want to process some input record
 --      with some isos here (dbType ←→ psType)
-class QueryCols s (rl ∷ RowList) (r ∷ # Type) | s rl → r where
-  colsImpl ∷ ∀ sql. RLProxy rl → Query s { result ∷ (Record r), cols ∷ Array (SomeCol sql) }
+class TableCols s (rl ∷ RowList) (r ∷ # Type) | s rl → r where
+  tableCols ∷ ∀ sql. RLProxy rl → Query s (Record r)
 
-instance nilCols ∷ QueryCols s Nil () where
-  colsImpl _ = pure { result: {}, cols: [] }
+instance nilTableCols ∷ TableCols s Nil () where
+  tableCols _ = pure {}
 
-instance consCols
-  ∷ ( QueryCols s tail r'
+instance consTableCols
+  ∷ ( TableCols s tail r'
     , IsSymbol name
     , RowLacks name r'
     , RowCons name (Col s a) r' r
     )
-  ⇒ QueryCols s (Cons name a tail) r
+  ⇒ TableCols s (Cons name a tail) r
   where
-  colsImpl _ = do
-    i ← Query freshId
+  tableCols _ = do
     let
-      name = reflectSymbol _name
-      name' = (name <> "_" <> show i)
-    { result, cols } ← colsImpl (RLProxy ∷ RLProxy tail)
-    let
-      result' = Data.Record.insert _name (Col (Column name')) result
-      cols' = Named name' (Column name) : cols
-    pure { result: result', cols: cols' }
-    where
-    _name = SProxy ∷ SProxy name
+      _name = (SProxy ∷ SProxy name)
+    result ← tableCols (RLProxy ∷ RLProxy tail)
+    pure $ Data.Record.insert _name (Col (Column (reflectSymbol _name))) result
 
 newtype Col s a = Col (Exp Select a)
 newtype Cols s (r ∷ # Type) = Cols (Record r)
 
 select
-  ∷ ∀ c cl cs s
+  ∷ ∀ c cl cs r s tc tcl
   . RowToList c cl
-  ⇒ QueryCols s cl cs
+  ⇒ TableCols s cl tc
+  ⇒ RowToList tc tcl
+  ⇒ Rename s tcl tc r
   ⇒ Table c
-  → Query s (Record cs)
+  → Query s (Record r)
 select (Table name) = do
-  { result, cols } ← colsImpl (RLProxy ∷ RLProxy cl)
+  tc ← tableCols (RLProxy ∷ RLProxy cl)
+  { result, cols } ← renameImpl (RLProxy ∷ RLProxy tcl) tc
   st ← Query get
   Query (put $ st { sources = sqlFrom cols (TableName name) [] : st.sources })
   pure result
 
-
--- rename :: SomeCol sql -> State GenState (SomeCol sql)
--- rename (Some col) = do
---     n <- freshId
---     return $ Named (newName n) col
---   where
---     newName ns =
---       case col of
---         Col n -> addColSuffix n $ "_" <> pack (show ns)
---         _     -> mkColName $ "tmp_" <> pack (show ns)
--- rename col@(Named _ _) = do
---   return col
-
-
 class Rename s (il ∷ RowList) (i ∷ # Type) (o ∷ # Type) | il i → o where
-  renameImpl ∷ RLProxy il → Record i → Query s { result ∷ Record o, cols ∷ Array (SomeCol Select) }
+  renameImpl ∷ ∀ sql. RLProxy il → Record i → Query s { result ∷ Record o, cols ∷ Array (SomeCol sql) }
 
 instance nilRename ∷ Rename s Nil r () where
   renameImpl _ _ = pure { result: {}, cols: [] }
@@ -216,6 +197,7 @@ instance consRename
     { result, cols } ← renameImpl (RLProxy ∷ RLProxy tail) r
     let
       result' = Data.Record.insert _name (Col (Column name')) result
+      -- | XXX: migrate SomeCol to Exists
       cols' = Named name' (unsafeCoerce col) : cols
     pure { result: result', cols: cols' }
     where
@@ -313,6 +295,7 @@ sum_ = aggr "SUM"
 groupBy ∷ ∀ a s. Col (Inner s) a → Query (Inner s) (Aggr (Inner s) a)
 groupBy (Col c) = Query $ do
   st ← get
+  -- XXX: migrate SomeCol to Exists
   put $ st { groupCols = Some (unsafeCoerce c) : st.groupCols }
   pure (Aggr c)
 
@@ -341,6 +324,7 @@ instance finalRecordColsCons
     )
   ⇒ FinalRecordCols (Cons name (Col s a) tail) r
   where
+  -- XXX: migrate SomeCol to Exists
   finalRecordCols _ r = Some (unsafeCoerce c) : finalRecordCols (RLProxy ∷ RLProxy tail) r
     where
     Col c = Data.Record.get (SProxy ∷ SProxy name) r
@@ -352,6 +336,7 @@ instance finalColsRecord ∷ (RowToList r rl, FinalRecordCols rl r) ⇒ FinalCol
   finalCols r = finalRecordCols (RLProxy ∷ RLProxy rl) r
 
 instance finalColsCol ∷ FinalCols (Col s a) where
+  -- XXX: migrate SomeCol to Exists
   finalCols (Col c) = [Some (unsafeCoerce c)]
 
 compQuery ∷ ∀ a s. (FinalCols a) ⇒ Scope → Query s a → Tuple Int Select
@@ -465,6 +450,7 @@ ppLit ∷ ∀ a. Lit a → PP String
 -- ppLit (LJust l) = ppLit l
 ppLit l = do
   s ← get
+  -- XXX: migrate Param to Exists
   put $ s { params = Param (unsafeCoerce l) : s.params, paramNS = s.paramNS + 1 }
   pure ("$" <> show s.paramNS)
 
