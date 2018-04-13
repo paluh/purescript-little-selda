@@ -15,7 +15,8 @@ import Data.Tuple (Tuple(..))
 import Debug.Trace (traceAnyA)
 import Partial.Unsafe (unsafeCrashWith)
 import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..), SProxy(..), reflectSymbol)
-import Type.Row (Cons, Nil, kind RowList)
+import Type.Proxy (Proxy(..))
+import Type.Row (class ListToRow, Cons, Nil, kind RowList)
 import Unsafe.Coerce (unsafeCoerce)
 
 data Table (r ∷ # Type) = Table String
@@ -63,7 +64,7 @@ derive newtype instance monadQuery ∷ Monad (Query s)
 data SqlSource
  = TableName String
  | Product (Array Select)
- -- | Join JoinType (Exp SQL Bool) !SQL !SQL
+ | Join JoinType (Exp Select Boolean) Select Select
  -- | Values ![SomeCol SQL] ![[Param]]
  -- | EmptyTable
 
@@ -158,6 +159,29 @@ instance consTableCols
 newtype Col s a = Col (Exp Select a)
 newtype Cols s (r ∷ # Type) = Cols (Record r)
 
+class OuterCols s (il ∷ RowList) (i ∷ #Type) (o ∷ #Type) | i il → o where
+  outer ∷ Proxy s → RLProxy il → Record i → Record o
+
+instance nilOuterCols ∷ OuterCols s Nil r () where
+  outer _ _ _ = {}
+
+instance consOuterCols
+  ∷ ( OuterCols s tail i o'
+    , IsSymbol name
+    , RowLacks name o'
+    , RowCons name (Col (Inner s) a) i' i
+    , RowCons name (Col s a) o' o
+    )
+  ⇒ OuterCols s (Cons name (Col (Inner s) a) tail) i o
+  where
+  outer s _ i =
+    let
+      _name = SProxy ∷ SProxy name
+      Col v = Data.Record.get _name i
+      o = outer s (RLProxy ∷ RLProxy tail) i
+    in
+      Data.Record.insert _name (Col v) o
+
 select
   ∷ ∀ c cl cs r s tc tcl
   . RowToList c cl
@@ -204,13 +228,13 @@ instance consRename
     _name = SProxy ∷ SProxy name
 
 aggregate
-  ∷ ∀ a al c cl cs s
+  ∷ ∀ a al c cl rc s
   . RowToList a al
   ⇒ Aggregates al a c
   ⇒ RowToList c cl
-  ⇒ Rename s cl c cs
+  ⇒ Rename s cl c rc
   ⇒ Query (Inner s) (Record a)
-  → Query s (Record cs)
+  → Query s (Record rc)
 aggregate q = do
   { genState, a: aggrs } ← Query $ isolate q
   traceAnyA aggrs
@@ -221,6 +245,58 @@ aggregate q = do
     sql = sqlFrom' cols (Product [state2sql genState]) _{ groups = genState.groupCols }
   Query (modify $ \st → st {sources = sql : st.sources })
   pure result
+
+-- 
+-- leftJoin :: (Columns a, Columns (OuterCols a), Columns (LeftCols a))
+--          => (OuterCols a -> Col s Bool)
+--             -- ^ Predicate determining which lines to join.
+--             -- | Right-hand query to join.
+--          -> Query (Inner s) a
+--          -> Query s (LeftCols a)
+-- leftJoin = someJoin LeftJoin
+-- 
+-- | Perform an @INNER JOIN@ with the current result set and the given query.
+innerJoin
+  ∷ ∀ a al ar o ol or s
+  . RowToList a al
+  ⇒ OuterCols s al a o
+  ⇒ RowToList o ol
+  ⇒ Rename s ol o or
+  ⇒ (Record or -> Col s Boolean)
+  -> Query (Inner s) (Record a)
+  -> Query s (Record or)
+innerJoin = someJoin InnerJoin
+
+-- | `a` is our scoped result which we want to use
+-- |     inside check and finally return
+-- | `a` --|outer|--> `o`
+someJoin
+  ∷ ∀ a al ar o ol or s
+  . RowToList a al
+  ⇒ OuterCols s al a o
+  ⇒ RowToList o ol
+  ⇒ Rename s ol o or
+  ⇒ JoinType
+  → (Record or → Col s Boolean)
+  → Query (Inner s) (Record a)
+  → Query s (Record or)
+someJoin jointype check inner = do
+  { genState: innerSt, a: inner' } ← Query $ isolate inner
+  let
+    o = outer (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy al) inner'
+  { result: innerTyped, cols: innerUntyped } ← renameImpl (RLProxy ∷ RLProxy ol) o
+  st ← Query get
+  let
+    left = state2sql st
+    right = sqlFrom' innerUntyped (Product [state2sql innerSt]) id
+    Col on = check innerTyped
+    outCols =  allCols [left] <> (catMaybes $ map (case _ of
+        Named n _ → Just (Some (Column n))
+        _ → Nothing) innerUntyped)
+  traceAnyA o
+  traceAnyA on
+  Query $ put (st {sources = [sqlFrom' outCols (Join jointype on left right) id]})
+  pure innerTyped
 
 class Aggregates (il ∷ RowList) (i ∷ # Type) (o ∷ # Type) | il i → o where
   unAggrs ∷ RLProxy il → Record i → Record o
@@ -357,7 +433,7 @@ allNonOutputColNames (Select sql) = fold
   , colNames (sql.groups)
   -- , colNames (map snd $ ordering sql)
   , case sql.source of
-      -- Join _ on _ _ → allNamesIn on
+      Join _ on _ _ → allNamesIn on
       _             → []
   ]
 
@@ -365,14 +441,26 @@ removeDeadCols ∷ Array String → Select → Select
 removeDeadCols live sql =
   case sql'.source of
     -- EmptyTable      → sql'
-    TableName _     → Select sql'
+    TableName _ → Select sql'
     -- Values  _ _     → sql'
-    Product qs      → Select (sql' {source = Product $ map noDead qs})
-    -- Join jt on l r  → sql' {source = Join jt on (noDead l) (noDead r)}
+    Product qs → Select (sql' {source = Product $ map noDead qs})
+    Join jt on l r  → Select (sql' {source = Join jt on (noDead l) (noDead r)})
   where
   Select sql' = keepCols (allNonOutputColNames sql <> live) sql
   live' = allColNames (Select sql')
   noDead = removeDeadCols live'
+  -- x = do
+  --   traceAnyA "\n\nLIVE"
+  --   traceAnyA live
+  --   traceAnyA "\n\nLIVE_PRIM"
+  --   traceAnyA live'
+  --   traceAnyA "\n\nALL_NON_OUTPUT_COL_NAMES"
+  --   traceAnyA (allNonOutputColNames sql)
+  --   traceAnyA "SQL_PRIM"
+  --   traceAnyA sql'
+  --   traceAnyA "SQL"
+  --   traceAnyA sql
+  --   Just 8
 
 keepCols ∷ Array String → Select → Select
 keepCols live (Select s@{ columns }) = Select $ s {columns = filtered}
@@ -549,6 +637,18 @@ ppSql (Select q) = do
       qn ← freshQueryName
       pure (q <> " AS " <> qn)
     pure $ " FROM " <> joinWith ", " qs
+  ppSrc (Join jointype on left right) = do
+    l' ← ppSql left
+    r' ← ppSql right
+    on' ← ppCol on
+    lqn ← freshQueryName
+    rqn ← freshQueryName
+    pure $ fold
+      [ " FROM (", l', ") AS ", lqn
+      , " ",  ppJoinType jointype, " (", r', ") AS ", rqn
+      , " ON ", on'
+      ]
+
 
   ppRestricts [] = pure ""
   ppRestricts rs = ppCols rs >>= \rs' → pure $ " WHERE " <> rs'
@@ -565,6 +665,9 @@ ppSql (Select q) = do
       _ → Nothing)
     pure $ " GROUP BY " <> joinWith ", " cls
 
+  ppJoinType LeftJoin  = "LEFT JOIN"
+  ppJoinType InnerJoin = "JOIN"
+
 
 --     ppSrc EmptyTable = do
 --       qn ← freshQueryName
@@ -579,20 +682,6 @@ ppSql (Select q) = do
 --         , ") AS "
 --         , qn
 --         ]
---     ppSrc (Join jointype on left right) = do
---       l' ← ppSql left
---       r' ← ppSql right
---       on' ← ppCol on
---       lqn ← freshQueryName
---       rqn ← freshQueryName
---       pure $ mconcat
---         [ " FROM (", l', ") AS ", lqn
---         , " ",  ppJoinType jointype, " (", r', ") AS ", rqn
---         , " ON ", on'
---         ]
--- 
---     ppJoinType LeftJoin  = "LEFT JOIN"
---     ppJoinType InnerJoin = "JOIN"
 -- 
 --     ppRow xs = do
 --       ls ← sequence [ppLit l | Param l ← xs]

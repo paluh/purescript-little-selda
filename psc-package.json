@@ -1,7 +1,7 @@
 {
   "name": "purescript-little-selda",
-  "set": "psc-0.11.7",
-  "source": "https://github.com/purescript/package-sets.git",
+  "set": "master",
+  "source": "https://github.com/lambdaterms/package-sets.git",
   "depends": [
     "exists",
     "leibniz",
@@ -12,6 +12,7 @@
     "prelude",
     "psci-support",
     "record",
+    "record-fold",
     "strings",
     "transformers",
     "typelevel-prelude"
