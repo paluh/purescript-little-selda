@@ -8,6 +8,7 @@ import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (fold, foldMap)
 import Data.Leibniz (type (~))
 import Data.Maybe (Maybe(..))
+import Data.Newtype (class Newtype)
 import Data.Record as Data.Record
 import Data.String (joinWith)
 import Data.Traversable (for, sequence, traverse)
@@ -246,41 +247,31 @@ aggregate q = do
   Query (modify $ \st → st {sources = sql : st.sources })
   pure result
 
--- 
--- leftJoin :: (Columns a, Columns (OuterCols a), Columns (LeftCols a))
---          => (OuterCols a -> Col s Bool)
---             -- ^ Predicate determining which lines to join.
---             -- | Right-hand query to join.
---          -> Query (Inner s) a
---          -> Query s (LeftCols a)
--- leftJoin = someJoin LeftJoin
--- 
--- | Perform an @INNER JOIN@ with the current result set and the given query.
-innerJoin
-  ∷ ∀ a al ar o ol or s
-  . RowToList a al
-  ⇒ OuterCols s al a o
-  ⇒ RowToList o ol
-  ⇒ Rename s ol o or
-  ⇒ (Record or -> Col s Boolean)
-  -> Query (Inner s) (Record a)
-  -> Query s (Record or)
-innerJoin = someJoin InnerJoin
+class LeftCols (il ∷ RowList) (ol ∷ RowList) | il → ol
 
--- | `a` is our scoped result which we want to use
--- |     inside check and finally return
--- | `a` --|outer|--> `o`
-someJoin
-  ∷ ∀ a al ar o ol or s
+instance a_leftColsNil ∷ LeftCols Nil Nil
+
+instance b_leftColsConsMaybe
+  ∷ LeftCols tail tail'
+  ⇒ LeftCols (Cons name (Maybe a) tail) (Cons name (Maybe a) tail')
+
+instance c_leftColsCons
+  ∷ ( LeftCols tail tail')
+  ⇒ LeftCols (Cons name a tail) (Cons name (Maybe a) tail')
+
+leftJoin ∷ ∀ a al a' al' ar ar' o o' ol ol' or or' orl orl' s
   . RowToList a al
   ⇒ OuterCols s al a o
   ⇒ RowToList o ol
   ⇒ Rename s ol o or
-  ⇒ JoinType
-  → (Record or → Col s Boolean)
+  ⇒ RowToList or orl
+  ⇒ LeftCols orl orl'
+  ⇒ ListToRow orl' or'
+
+  ⇒ (Record or → Col s Boolean)
   → Query (Inner s) (Record a)
-  → Query s (Record or)
-someJoin jointype check inner = do
+  → Query s (Record or')
+leftJoin check inner = do
   { genState: innerSt, a: inner' } ← Query $ isolate inner
   let
     o = outer (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy al) inner'
@@ -293,10 +284,65 @@ someJoin jointype check inner = do
     outCols =  allCols [left] <> (catMaybes $ map (case _ of
         Named n _ → Just (Some (Column n))
         _ → Nothing) innerUntyped)
-  traceAnyA o
-  traceAnyA on
-  Query $ put (st {sources = [sqlFrom' outCols (Join jointype on left right) id]})
+  Query $ put (st {sources = [sqlFrom' outCols (Join LeftJoin on left right) id]})
+  -- | It may seem strange but all expressions have to change
+  -- | type to nullable here.
+  pure (unsafeCoerce innerTyped)
+
+-- | Perform an @INNER JOIN@ with the current result set and the given query.
+innerJoin
+  ∷ ∀ a al ar o ol or s
+  . RowToList a al
+  ⇒ OuterCols s al a o
+  ⇒ RowToList o ol
+  ⇒ Rename s ol o or
+  ⇒ (Record or → Col s Boolean)
+  → Query (Inner s) (Record a)
+  → Query s (Record or)
+innerJoin check inner = do
+  { genState: innerSt, a: inner' } ← Query $ isolate inner
+  let
+    o = outer (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy al) inner'
+  { result: innerTyped, cols: innerUntyped } ← renameImpl (RLProxy ∷ RLProxy ol) o
+  st ← Query get
+  let
+    left = state2sql st
+    right = sqlFrom' innerUntyped (Product [state2sql innerSt]) id
+    Col on = check innerTyped
+    outCols =  allCols [left] <> (catMaybes $ map (case _ of
+        Named n _ → Just (Some (Column n))
+        _ → Nothing) innerUntyped)
+  Query $ put (st {sources = [sqlFrom' outCols (Join InnerJoin on left right) id]})
   pure innerTyped
+
+-- | `a` is our scoped result which we want to use
+-- |     inside check and finally return
+-- | `a` --|outer|--> `o`
+-- someJoin
+--   ∷ ∀ a al ar o ol or s
+--   . RowToList a al
+--   ⇒ OuterCols s al a o
+--   ⇒ RowToList o ol
+--   ⇒ Rename s ol o or
+--   ⇒ JoinType
+--   → (Record or → Col s Boolean)
+--   → Query (Inner s) (Record a)
+--   → Query s (Record or)
+-- someJoin jointype check inner = do
+--   { genState: innerSt, a: inner' } ← Query $ isolate inner
+--   let
+--     o = outer (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy al) inner'
+--   { result: innerTyped, cols: innerUntyped } ← renameImpl (RLProxy ∷ RLProxy ol) o
+--   st ← Query get
+--   let
+--     left = state2sql st
+--     right = sqlFrom' innerUntyped (Product [state2sql innerSt]) id
+--     Col on = check innerTyped
+--     outCols =  allCols [left] <> (catMaybes $ map (case _ of
+--         Named n _ → Just (Some (Column n))
+--         _ → Nothing) innerUntyped)
+--   Query $ put (st {sources = [sqlFrom' outCols (Join jointype on left right) id]})
+--   pure innerTyped
 
 class Aggregates (il ∷ RowList) (i ∷ # Type) (o ∷ # Type) | il i → o where
   unAggrs ∷ RLProxy il → Record i → Record o
@@ -648,7 +694,6 @@ ppSql (Select q) = do
       , " ",  ppJoinType jointype, " (", r', ") AS ", rqn
       , " ON ", on'
       ]
-
 
   ppRestricts [] = pure ""
   ppRestricts rs = ppCols rs >>= \rs' → pure $ " WHERE " <> rs'

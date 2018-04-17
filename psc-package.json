@@ -1,19 +1,21 @@
 {
   "name": "purescript-little-selda",
-  "set": "master",
+  "set": "selda",
   "source": "https://github.com/lambdaterms/package-sets.git",
   "depends": [
-    "exists",
-    "leibniz",
+    "assert",
     "console",
     "debug",
     "eff",
+    "exists",
     "leibniz",
+    "postgresql-client",
     "prelude",
     "psci-support",
     "record",
     "record-fold",
     "strings",
+    "test-unit",
     "transformers",
     "typelevel-prelude"
   ]
