@@ -24,7 +24,7 @@ import Data.Newtype (unwrap)
 import Data.Record (insert)
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..), fst)
-import Database.PostgreSQL (POSTGRESQL, Query(..), PoolConfiguration, execute, newPool, query, Row0(..), Row1(..), Row2(..), Row6(..), Row8(..), Row9(..), scalar, withConnection, withTransaction)
+import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), Row1(..), Row2(..), Row6(..), Row8(..), Row9(..), execute, newPool, query, scalar, unsafeQuery, withConnection, withTransaction)
 import Database.PostgreSQL (class FromSQLValue, class ToSQLRow, Connection, POSTGRESQL, fromSQLValue, toSQLRow, unsafeQuery)
 import Database.PostgreSQL as Postgresql
 import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), Col(..), Exp(..), JoinType(..), Lit(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compQuery, count, groupBy, innerJoin, ppSql, restrict, runQuery, select, state2sql)
@@ -119,8 +119,8 @@ instance b_sqlToRecordCons
       case uncons xs of
         Nothing → Left $ "Row lacking fields when trying fetch " <> reflectSymbol _name <> " field value."
         Just { head, tail } → do
-          t ← sqlToRecord (RLProxy ∷ RLProxy tail) tail
           h ← fromSQLValue head
+          t ← sqlToRecord (RLProxy ∷ RLProxy tail) tail
           pure (insert _name h t)
 
 instance c_sqlToRecordCons
@@ -136,12 +136,12 @@ instance c_sqlToRecordCons
       _name = SProxy ∷ SProxy name
     in
       case uncons xs of
-        Nothing → Left $ "Row lacking fields when trying fetch " <> reflectSymbol _name <> " field value."
+        Nothing →
+          Left $ "Row lacking fields when trying fetch " <> reflectSymbol _name <> " field value."
         Just { head, tail } → do
-          t ← sqlToRecord (RLProxy ∷ RLProxy tail) tail
           h ← fromSQLValue head
+          t ← sqlToRecord (RLProxy ∷ RLProxy tail) tail
           pure (insert _name h t)
-
 
 order ∷ Table
   ( billingAddress :: String
@@ -153,23 +153,9 @@ order ∷ Table
   , billingHomeNumber :: String
   , billingPostalCode :: String
   -- Why String?
-  , id ∷ String
+  , id ∷ Int
   )
 order = Table "orders"
-
-queryPsql
-  ∷ ∀ o o' ol r eff
-  . RowToList o ol
-  ⇒ SqlToRecord ol o'
-  ⇒ Connection
-  → Postgresql.Query (Array Foreign) (Record o)
-  → (Array Foreign)
-  → Aff (postgreSQL ∷ POSTGRESQL | eff) (Array (Record o'))
-queryPsql conn (Postgresql.Query sql) values =
-  unsafeQuery conn sql values
-  >>= traverse (sqlToRecord (RLProxy ∷ RLProxy ol) >>> case _ of
-    Right row → pure row
-    Left  msg → throwError (error msg))
 
 pLit ∷ ∀ a. Lit a → a
 pLit (LInt v f) = coerce f v
@@ -177,13 +163,13 @@ pLit (LString v f) = coerce f v
 pLit (LBool v f) = coerce f v
 
 run
-  ∷ ∀ sql a a' eff al al'
-  . FinalCols (Record a)
-  ⇒ RowToList a al
-  ⇒ SqlToRecord al a'
+  ∷ ∀ sql o o' ol eff
+  . FinalCols (Record o)
+  ⇒ RowToList o ol
+  ⇒ SqlToRecord ol o'
   ⇒ Connection
-  → Selda.Query sql (Record a)
-  → Aff ( postgreSQL ∷ POSTGRESQL | eff ) (Array { | a' })
+  → Selda.Query sql (Record o)
+  → Aff ( postgreSQL ∷ POSTGRESQL | eff ) (Array { | o' })
 run conn query = do
   let
     Tuple r e = compQuery 1 query
@@ -194,14 +180,14 @@ run conn query = do
       , queryNS: 1
       }
     Tuple sql state = runState (ppSql e) s
-    q ∷ Postgresql.Query (Array Foreign) {|a}
-    q =
-      unsafeCoerce $ Postgresql.Query sql
     unParam (Param a) = a
     params = (map (toForeign <<< pLit <<< unParam) state.params)
-  traceAnyA sql
-  traceAnyA params
-  queryPsql conn q params
+  unsafeQuery conn sql params
+    >>= \r → do
+      pure r
+    >>= traverse (sqlToRecord (RLProxy ∷ RLProxy ol) >>> case _ of
+      Right row → pure row
+      Left  msg → throwError (error msg))
 
 main ∷ ∀ eff. Eff (assert ∷ ASSERT, exception ∷ EXCEPTION, postgreSQL ∷ POSTGRESQL | eff) Unit
 main = void $ launchAff do
@@ -222,7 +208,7 @@ main = void $ launchAff do
         billingFullName TEXT NOT NULL,
         billingHomeNumber TEXT NOT NULL,
         billingPostalCode TEXT NOT NULL,
-        id BIGSERIAL PRIMARY KEY
+        id INTEGER PRIMARY KEY
       );
     """) Row0
 
@@ -244,13 +230,13 @@ main = void $ launchAff do
     execute conn (Postgresql.Query """
       INSERT INTO orders (billingAddress, billingCity, billingCompanyName, billingCompanyTaxId, billingFlatNumber, billingFullName, billingHomeNumber, billingPostalCode, id)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    """) (Row9 "Piastowska" "Gubin" "print-k" "8861577777" "1" "Jarosław Banan" "2" "66-620" 8)
+    """) (Row9 "Piastowska" "Gubin" "print-k" "8861577777" "1" "Jarosław Banan" "2" "66-620" 3)
 
     let
       getOrder ∷ _
       getOrder = do
         o ← select order
-        restrict (o.billingCity `eq` lStr "Gubin")
+        restrict (o.id `lt` lInt 3)
         pure o
     a ← run conn getOrder
     traceAnyA $ a
