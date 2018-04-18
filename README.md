@@ -1,3 +1,10 @@
-An attempt to port Haskell Selda to Purescript.
+# purescript-little-selda
 
-Still experimenting phase.
+An attempt to port Haskell Selda to Purescript. Experimental phase.
+
+## Testing
+
+```shell
+$ pulp test --main 'Test.Integration'
+```
+

@@ -210,6 +210,12 @@ main = void $ launchAff do
         billingPostalCode TEXT NOT NULL,
         id INTEGER PRIMARY KEY
       );
+      CREATE TEMPORARY TABLE invoice (
+        orderId INTEGER PRIMARY KEY REFERENCES "orders" UNIQUE,
+        invoiceNumber SERIAL UNIQUE NOT NULL,
+        invoiceName TEXT NOT NULL,
+        invoiceRaised TIMESTAMP WITH TIME ZONE NOT NULL
+      );
     """) Row0
 
     execute conn (Postgresql.Query """
@@ -220,7 +226,7 @@ main = void $ launchAff do
     execute conn (Postgresql.Query """
       INSERT INTO orders (billingAddress, billingCity, billingCompanyName, billingCompanyTaxId, billingFlatNumber, billingFullName, billingHomeNumber, billingPostalCode, id)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    """) (Row9 "Jana Pawła II" "Osiecznica" "lambdaterms" "9261577777" "2" "Tomasz Rybarczyk" "42" "66-600" 1)
+    """) (Row9 "Jana Pawła II" "Osiecznica" "lambdaterms" "9261577777" "2" "Tymasz Romarczyk" "88" "66-666" 1)
 
     execute conn (Postgresql.Query """
       INSERT INTO orders (billingAddress, billingCity, billingCompanyName, billingCompanyTaxId, billingFlatNumber, billingFullName, billingHomeNumber, billingPostalCode, id)
@@ -230,7 +236,7 @@ main = void $ launchAff do
     execute conn (Postgresql.Query """
       INSERT INTO orders (billingAddress, billingCity, billingCompanyName, billingCompanyTaxId, billingFlatNumber, billingFullName, billingHomeNumber, billingPostalCode, id)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    """) (Row9 "Piastowska" "Gubin" "print-k" "8861577777" "1" "Jarosław Banan" "2" "66-620" 3)
+    """) (Row9 "Piastowska" "Gubin" "printel-k" "8861577777" "1" "Jarosław Banan" "2" "66-620" 3)
 
     let
       getOrder ∷ _
