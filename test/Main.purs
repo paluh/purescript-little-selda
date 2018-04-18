@@ -58,9 +58,9 @@ onExp ∷ ∀ sql. Exp sql Boolean
 onExp = BinaryOp (mkExists $ BinOpExp (Eq { eq: (==), o: id }) (Column "vegsId_1" ∷ Exp sql Int) (Column "id_3" ∷ Exp sql Int))
 
 
-leftExp = Select { columns: [Named "vegsId_1" (Column "vegsId")], source: TableName "favoriteVegs", restricts: [], groups: [] }
+leftExp = Select { columns: [Named "vegsId_1" (Column "vegsId")], source: TableName "favoriteVegs", restricts: [], groups: [], ordering: [] }
 
-rightExp = Select { columns: [Named "colour_2" (Column "colour"), Named "id_3" (Column "id")], source: TableName "vegs", restricts: [], groups: [] }
+rightExp = Select { columns: [Named "colour_2" (Column "colour"), Named "id_3" (Column "id")], source: TableName "vegs", restricts: [], groups: [], ordering: [] }
 
 joinExp = Join InnerJoin onExp leftExp rightExp
 

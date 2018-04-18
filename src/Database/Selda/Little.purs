@@ -43,7 +43,13 @@ state2sql ∷ GenState → Select
 state2sql { sources: [Select sql], staticRestricts } =
   Select (sql { restricts = sql.restricts <> staticRestricts })
 state2sql { sources, staticRestricts }  =
-  Select { columns: allCols sources, source: Product sources, restricts: staticRestricts, groups: [] }
+  Select
+    { columns: allCols sources
+    , source: Product sources
+    , restricts: staticRestricts
+    , groups: []
+    , ordering: []
+    }
 
 allCols ∷ Array Select → Array (SomeCol Select)
 allCols sqls = do
@@ -52,7 +58,7 @@ allCols sqls = do
   pure (outCol col)
   where
     outCol (Named n _) = Some (Column n)
-    outCol c           = c
+    outCol c = c
 
 
 newtype Query s a = Query (State GenState a)
@@ -113,12 +119,16 @@ data SomeCol sql
   = Some (∀ a. Exp sql a)
   | Named String (∀ a. Exp sql a)
 
+data Order = Asc | Desc
+derive instance orderOrd ∷ Ord Order
+derive instance orderEq ∷ Eq Order
+
 newtype Select = Select
   { columns ∷ Array (SomeCol Select)
   , source ∷ SqlSource
   , restricts ∷ Array (Exp Select Boolean)
   , groups ∷ Array (SomeCol Select)
---   -- , ordering  ∷ ![(Order, SomeCol SQL)]
+  , ordering ∷ Array { order ∷ Order, column ∷ Exists (Exp Select) }
 --   -- , limits    ∷ !(Maybe (Int, Int))
 --   -- , distinct  ∷ !Bool
   }
@@ -421,6 +431,21 @@ groupBy (Col c) = Query $ do
   put $ st { groupCols = Some (unsafeCoerce c) : st.groupCols }
   pure (Aggr c)
 
+order ∷ ∀ a s. Order → Col s a → Query s Unit
+order order (Col exp) = do
+  let
+    c = mkExists exp
+    o = {order, column: c}
+  st ← Query get
+  case st.sources of
+    [Select sql] → Query $ put $ st { sources = [ Select sql { ordering = o : sql.ordering } ] }
+    ss →
+      let
+        columns = (allCols ss)
+        sources = Product ss
+      in
+        Query $ put $ st { sources = [ sqlFrom' columns sources _{ ordering = [o] }]}
+
 runQuery ∷ ∀ a s. Scope → Query s a → Tuple a GenState
 runQuery scope (Query query) = runState query (initState scope)
 
@@ -462,7 +487,7 @@ instance finalColsCol ∷ FinalCols (Col s a) where
   finalCols (Col c) = [Some (unsafeCoerce c)]
 
 compQuery ∷ ∀ a s. (FinalCols a) ⇒ Scope → Query s a → Tuple Int Select
-compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs], restricts: [], groups: [] })
+compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs], restricts: [], groups: [], ordering: [] })
   where
   Tuple cs st = runQuery ns q
   final = finalCols cs
@@ -536,7 +561,7 @@ allNamesIn (Literal _) = []
 allNamesIn (BinaryOp e) = runExists (\(BinOpExp _ e1 e2) → allNamesIn e1 <> allNamesIn e2) e
 allNamesIn (Aggregate e) = runExists (\(AggrExp _ x) → allNamesIn x) e
 
-sqlFrom' columns source f = Select $ f { columns, source, restricts: [], groups: [] }
+sqlFrom' columns source f = Select $ f { columns, source, restricts: [], groups: [], ordering: [] }
 
 
 sqlFrom ∷ Array (SomeCol Select) → SqlSource → Array (Exp Select Boolean) → Select
@@ -545,7 +570,7 @@ sqlFrom cs src restricts = Select
   , source: src
   , restricts: restricts
   , groups: []
-  -- , ordering = []
+  , ordering: []
   -- , limits = Nothing
   -- , distinct = False
   }
@@ -656,16 +681,16 @@ ppSql ∷ Select → PP String
 ppSql (Select q) = do
   columns ← traverse ppSomeCol q.columns
   source ← ppSrc q.source
-  r' ← ppRestricts q.restricts 
+  r' ← ppRestricts q.restricts
   gs' ← ppGroups q.groups
-  -- ord' ← ppOrder ord
+  ord' ← ppOrder q.ordering
   -- lim' ← ppLimit lim
   pure $ fold
     [ "SELECT ", result columns
     , source
     , r'
     , gs'
-    -- , ord'
+    , ord'
     -- , lim'
     ]
   where
@@ -713,6 +738,21 @@ ppSql (Select q) = do
   ppJoinType LeftJoin  = "LEFT JOIN"
   ppJoinType InnerJoin = "JOIN"
 
+  ppOrder [] = pure ""
+  ppOrder os = do
+    os' ← for os \{ order, column } →
+      (\c o → c <> " " <> o) <$> runExists ppCol column <@> ppOrd order
+    pure $ " ORDER BY " <> joinWith ", " os'
+
+  ppOrd Asc = "ASC"
+  ppOrd Desc = "DESC"
+
+  -- ppLimit Nothing =
+  --   pure ""
+  -- ppLimit (Just (off, limit)) =
+  --   pure $ " LIMIT " <> ppInt limit <> " OFFSET " <> ppInt off
+
+
 
 --     ppSrc EmptyTable = do
 --       qn ← freshQueryName
@@ -731,19 +771,6 @@ ppSql (Select q) = do
 --     ppRow xs = do
 --       ls ← sequence [ppLit l | Param l ← xs]
 --       pure $ Text.intercalate ", " ls
--- 
---     ppOrder [] = pure ""
---     ppOrder os = do
---       os' ← sequence [(<> (" " <> ppOrd o)) <$> ppCol c | (o, Some c) ← os]
---       pure $ " ORDER BY " <> Text.intercalate ", " os'
--- 
---     ppOrd Asc = "ASC"
---     ppOrd Desc = "DESC"
--- 
---     ppLimit Nothing =
---       pure ""
---     ppLimit (Just (off, limit)) =
---       pure $ " LIMIT " <> ppInt limit <> " OFFSET " <> ppInt off
 -- 
 --     ppInt = Text.pack . show
 

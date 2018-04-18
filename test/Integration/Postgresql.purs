@@ -17,7 +17,7 @@ import Control.Monad.Eff.Exception (error)
 import Control.Monad.Error.Class (throwError, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.State (runState)
-import Data.Array (all, length, sortBy, uncons, zip)
+import Data.Array (all, filter, length, sort, sortBy, uncons, zip)
 import Data.Either (Either(..))
 import Data.Exists (mkExists)
 import Data.Foldable (for_)
@@ -40,7 +40,7 @@ import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), 
 import Database.PostgreSQL (class FromSQLValue, class ToSQLRow, Connection, POSTGRESQL, fromSQLValue, toSQLRow, unsafeQuery)
 import Database.PostgreSQL as Postgresql
 import Database.PostgreSQL as Postgresql
-import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), Col(..), Exp(..), JoinType(..), Lit(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compQuery, count, groupBy, innerJoin, ppSql, restrict, runQuery, select, state2sql)
+import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), Col(..), Exp(..), JoinType(..), Lit(..), Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compQuery, count, groupBy, innerJoin, order, ppSql, restrict, runQuery, select, state2sql)
 import Database.Selda.Little as Selda
 import Debug.Trace (traceAnyA)
 import Test.Unit (TestSuite, test)
@@ -283,22 +283,45 @@ suite = do
               assert
                 "all rows"
                 (all (\(Tuple o1 o2) → rEq o1 o2)
-                (zip (sortBy (\o1 o2 → o1.id `compare` o2.id) rows) initialOrders))
+                  (zip (sortBy (\o1 o2 → o1.id `compare` o2.id) rows) initialOrders))
 
           test "restricts to given subset" $ do
             withRollback conn $ do
               for_ initialOrders (insertOrder conn)
               let
+                gubin = "Gubin"
                 ordersFromGubin = do
                   o ← select orders
-                  restrict (o.billingCity `eq` lStr "Gubin")
+                  restrict (o.billingCity `eq` lStr gubin)
                   pure o
+                expected =
+                  filter ((gubin == _) <<< _.billingCity) initialOrders
               rows ← run conn ordersFromGubin
-              equal (length rows) (length initialOrders)
+              equal (length expected) (length rows)
               assert
-                "all rows"
-                (all (\(Tuple o1 o2) → rEq o1 o2)
-                (zip (sortBy (\o1 o2 → o1.id `compare` o2.id) rows) initialOrders))
+                "Filtered rows match"
+                (all
+                  (\(Tuple o1 o2) → rEq o1 o2)
+                  (zip expected (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
+          test "single ordering" $ do
+            withRollback conn $ do
+              for_ initialOrders (insertOrder conn)
+              let
+                ids = map _.id initialOrders
+                qD = do
+                  o ← select orders
+                  order Desc o.id
+                  pure o
+                qA = do
+                  o ← select orders
+                  order Asc o.id
+                  pure o
+              rowsA ← run conn qA
+              equal (sort ids) (map _.id rowsA)
+
+              rowsD ← run conn qD
+              equal (sortBy (flip compare) ids) (map _.id rowsD)
+
 
 withRollback conn action = do
     execute conn (Postgresql.Query "BEGIN TRANSACTION") Row0
