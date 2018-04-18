@@ -7,8 +7,8 @@ import Data.Array (any, catMaybes, elem, filter, reverse, (:))
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (fold, foldMap)
 import Data.Leibniz (type (~))
-import Data.Maybe (Maybe(..))
-import Data.Newtype (class Newtype)
+import Data.Maybe (Maybe(..), isNothing)
+import Data.Newtype (class Newtype, unwrap)
 import Data.Record as Data.Record
 import Data.String (joinWith)
 import Data.Traversable (for, sequence, traverse)
@@ -49,6 +49,7 @@ state2sql { sources, staticRestricts }  =
     , restricts: staticRestricts
     , groups: []
     , ordering: []
+    , limits: Nothing
     }
 
 allCols ∷ Array Select → Array (SomeCol Select)
@@ -129,9 +130,11 @@ newtype Select = Select
   , restricts ∷ Array (Exp Select Boolean)
   , groups ∷ Array (Exists (Exp Select))
   , ordering ∷ Array { order ∷ Order, column ∷ Exists (Exp Select) }
---   -- , limits    ∷ !(Maybe (Int, Int))
+  , limits ∷ Maybe { limit ∷ Int, offset ∷ Int }
 --   -- , distinct  ∷ !Bool
   }
+derive instance newtypeSelect ∷ Newtype Select _
+
 -- | Get a guaranteed unique identifier.
 freshId ∷ State GenState Name
 freshId = do
@@ -431,6 +434,24 @@ groupBy (Col c) = Query $ do
   put $ st { groupCols = mkExists c : st.groupCols }
   pure (Aggr c)
 
+limit
+  ∷ ∀ a a' al s
+  . OuterCols s al a a'
+  ⇒ RowToList a al
+  ⇒ { limit ∷ Int, offset ∷ Int }
+  → Query (Inner s) {|a}
+  → Query s {|a'}
+limit l q = do
+  { genState: qSt, a } ← Query $ isolate q
+  st ← Query get
+  let
+    sql' = case qSt.sources of
+      [Select sql] | isNothing sql.limits → sql
+      ss → unwrap $ sqlFrom' (allCols ss) (Product ss) id
+  Query $ put $ st { sources = Select (sql' { limits = Just l }) : st.sources }
+  pure $ outer (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy al) a
+
+
 order ∷ ∀ a s. Order → Col s a → Query s Unit
 order order (Col exp) = do
   let
@@ -487,7 +508,7 @@ instance finalColsCol ∷ FinalCols (Col s a) where
   finalCols (Col c) = [Some (unsafeCoerce c)]
 
 compQuery ∷ ∀ a s. (FinalCols a) ⇒ Scope → Query s a → Tuple Int Select
-compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs], restricts: [], groups: [], ordering: [] })
+compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [srcs], restricts: [], groups: [], ordering: [], limits: Nothing })
   where
   Tuple cs st = runQuery ns q
   final = finalCols cs
@@ -502,7 +523,7 @@ allNonOutputColNames ∷ Select → Array String
 allNonOutputColNames (Select sql) = fold
   [ foldMap allNamesIn sql.restricts
   , foldMap (runExists allNamesIn) (sql.groups)
-  -- , colNames (map snd $ ordering sql)
+  , foldMap (runExists allNamesIn <<< _.column) sql.ordering
   , case sql.source of
       Join _ on _ _ → allNamesIn on
       _             → []
@@ -561,7 +582,7 @@ allNamesIn (Literal _) = []
 allNamesIn (BinaryOp e) = runExists (\(BinOpExp _ e1 e2) → allNamesIn e1 <> allNamesIn e2) e
 allNamesIn (Aggregate e) = runExists (\(AggrExp _ x) → allNamesIn x) e
 
-sqlFrom' columns source f = Select $ f { columns, source, restricts: [], groups: [], ordering: [] }
+sqlFrom' columns source f = Select $ f { columns, source, restricts: [], groups: [], ordering: [], limits: Nothing }
 
 
 sqlFrom ∷ Array (SomeCol Select) → SqlSource → Array (Exp Select Boolean) → Select
@@ -571,7 +592,7 @@ sqlFrom cs src restricts = Select
   , restricts: restricts
   , groups: []
   , ordering: []
-  -- , limits = Nothing
+  , limits: Nothing
   -- , distinct = False
   }
 
@@ -684,14 +705,14 @@ ppSql (Select q) = do
   r' ← ppRestricts q.restricts
   gs' ← ppGroups q.groups
   ord' ← ppOrder q.ordering
-  -- lim' ← ppLimit lim
+  lim' ← ppLimit q.limits
   pure $ fold
     [ "SELECT ", result columns
     , source
     , r'
     , gs'
     , ord'
-    -- , lim'
+    , lim'
     ]
   where
   result [] = "1"
@@ -745,10 +766,10 @@ ppSql (Select q) = do
   ppOrd Asc = "ASC"
   ppOrd Desc = "DESC"
 
-  -- ppLimit Nothing =
-  --   pure ""
-  -- ppLimit (Just (off, limit)) =
-  --   pure $ " LIMIT " <> ppInt limit <> " OFFSET " <> ppInt off
+  ppLimit Nothing =
+    pure ""
+  ppLimit (Just { limit, offset }) =
+    pure $ " LIMIT " <> show limit <> " OFFSET " <> show offset
 
 
 

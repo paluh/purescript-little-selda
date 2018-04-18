@@ -17,7 +17,7 @@ import Control.Monad.Eff.Exception (error)
 import Control.Monad.Error.Class (throwError, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.State (runState)
-import Data.Array (all, filter, length, sort, sortBy, uncons, zip)
+import Data.Array (all, filter, length, sort, sortBy, take, uncons, zip)
 import Data.Either (Either(..))
 import Data.Exists (mkExists)
 import Data.Foldable (for_)
@@ -40,7 +40,7 @@ import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), 
 import Database.PostgreSQL (class FromSQLValue, class ToSQLRow, Connection, POSTGRESQL, fromSQLValue, toSQLRow, unsafeQuery)
 import Database.PostgreSQL as Postgresql
 import Database.PostgreSQL as Postgresql
-import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), Col(..), Exp(..), JoinType(..), Lit(..), Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compQuery, count, groupBy, innerJoin, order, ppSql, restrict, runQuery, select, state2sql)
+import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), Col(..), Exp(..), JoinType(..), Lit(..), Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compQuery, count, groupBy, innerJoin, limit, order, ppSql, restrict, runQuery, select, state2sql)
 import Database.Selda.Little as Selda
 import Debug.Trace (traceAnyA)
 import Test.Unit (TestSuite, test)
@@ -272,8 +272,8 @@ suite = do
         ]
     liftEff $ runTest $ do
       Test.Unit.suite "Integration.Postgresql" $ do
-        Test.Unit.suite "Select and restrict from single table" $ do
-          test "fetches all rows" $ do
+        Test.Unit.suite "single table" $ do
+          test "select all rows" $ do
             withRollback conn do
               for_ initialOrders (insertOrder conn)
               let
@@ -281,11 +281,11 @@ suite = do
               rows ← run conn allOrders
               equal (length rows) (length initialOrders)
               assert
-                "all rows"
+                "all rows found"
                 (all (\(Tuple o1 o2) → rEq o1 o2)
                   (zip (sortBy (\o1 o2 → o1.id `compare` o2.id) rows) initialOrders))
 
-          test "restricts to given subset" $ do
+          test "restricting by simple prediate" $ do
             withRollback conn $ do
               for_ initialOrders (insertOrder conn)
               let
@@ -299,11 +299,11 @@ suite = do
               rows ← run conn ordersFromGubin
               equal (length expected) (length rows)
               assert
-                "Filtered rows match"
+                "filtered rows found"
                 (all
                   (\(Tuple o1 o2) → rEq o1 o2)
                   (zip expected (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
-          test "single ordering" $ do
+          test "ordering by single column" $ do
             withRollback conn $ do
               for_ initialOrders (insertOrder conn)
               let
@@ -321,6 +321,24 @@ suite = do
 
               rowsD ← run conn qD
               equal (sortBy (flip compare) ids) (map _.id rowsD)
+          test "limiting" $ do
+            withRollback conn $ do
+              for_ initialOrders (insertOrder conn)
+              let
+                ids = map _.id initialOrders
+                q1 = limit { limit: 1, offset: 0 } do
+                  o ← select orders
+                  order Asc o.id
+                  pure o
+                q2 = limit { limit: 2, offset: 0 } do
+                  o ← select orders
+                  order Asc o.id
+                  pure o
+              rows1 ← run conn q1
+              equal (take 1 $ sort ids) (map _.id rows1)
+
+              rows2 ← run conn q2
+              equal (take 2 $ sort ids) (map _.id rows2)
 
 
 withRollback conn action = do
