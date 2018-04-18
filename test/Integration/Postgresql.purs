@@ -2,7 +2,7 @@ module Test.Integration.Postgresql where
 
 import Prelude
 
-import Control.Monad.Aff (Aff)
+import Control.Monad.Aff (Aff, catchError)
 import Control.Monad.Aff (Aff, launchAff)
 import Control.Monad.Aff (launchAff)
 import Control.Monad.Aff.AVar (AVAR)
@@ -203,7 +203,7 @@ orders ∷ Table
   , billingCity :: String
   , billingCompanyName :: String
   , billingCompanyTaxId :: String
-  , billingFlatNumber :: String
+  , billingFlatNumber :: Maybe String
   , billingFullName :: String
   , billingHomeNumber :: String
   , billingPostalCode :: String
@@ -252,7 +252,7 @@ suite = do
           , billingCity: "Gubin"
           , billingCompanyName: "plintel-z"
           , billingCompanyTaxId: "8861577777"
-          , billingFlatNumber: "1"
+          , billingFlatNumber: Just "1"
           , billingFullName: "Gościsław B"
           , billingHomeNumber: "2"
           , billingPostalCode: "88-260"
@@ -262,7 +262,7 @@ suite = do
           , billingCity: "Gubin"
           , billingCompanyName: "fingerbimber"
           , billingCompanyTaxId: "886157999"
-          , billingFlatNumber: "1"
+          , billingFlatNumber: Just "1"
           , billingFullName: "Rymasz Tomarczyk"
           , billingHomeNumber: "20"
           , billingPostalCode: "88-260"
@@ -272,7 +272,7 @@ suite = do
           , billingCity: "Osesek"
           , billingCompanyName: "bimberbau"
           , billingCompanyTaxId: "92615777"
-          , billingFlatNumber: "2"
+          , billingFlatNumber: Just "2"
           , billingFullName: "Tymasz Romarczyk"
           , billingHomeNumber: "88"
           , billingPostalCode: "66-666"
@@ -351,6 +351,7 @@ suite = do
 
 
 withRollback conn action = do
-    execute conn (Postgresql.Query "BEGIN TRANSACTION") Row0
-    action
-    execute conn (Postgresql.Query "ROLLBACK") Row0
+  execute conn (Postgresql.Query "BEGIN TRANSACTION") Row0
+  catchError (action >>= const rollback) (\e → rollback >>= const (throwError e))
+  where
+  rollback = execute conn (Postgresql.Query "ROLLBACK") Row0
