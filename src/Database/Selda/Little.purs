@@ -34,7 +34,7 @@ instance showName ∷ Show Name where
 type GenState =
   { sources ∷ Array Select
   , staticRestricts ∷ Array (Exp Select Boolean)
-  , groupCols ∷ Array (SomeCol Select)
+  , groupCols ∷ Array (Exists (Exp Select))
   , nameSupply ∷ Int
   , nameScope ∷ Int
   }
@@ -127,7 +127,7 @@ newtype Select = Select
   { columns ∷ Array (SomeCol Select)
   , source ∷ SqlSource
   , restricts ∷ Array (Exp Select Boolean)
-  , groups ∷ Array (SomeCol Select)
+  , groups ∷ Array (Exists (Exp Select))
   , ordering ∷ Array { order ∷ Order, column ∷ Exists (Exp Select) }
 --   -- , limits    ∷ !(Maybe (Int, Int))
 --   -- , distinct  ∷ !Bool
@@ -428,7 +428,7 @@ groupBy ∷ ∀ a s. Col (Inner s) a → Query (Inner s) (Aggr (Inner s) a)
 groupBy (Col c) = Query $ do
   st ← get
   -- XXX: migrate SomeCol to Exists
-  put $ st { groupCols = Some (unsafeCoerce c) : st.groupCols }
+  put $ st { groupCols = mkExists c : st.groupCols }
   pure (Aggr c)
 
 order ∷ ∀ a s. Order → Col s a → Query s Unit
@@ -501,7 +501,7 @@ type ColName = String
 allNonOutputColNames ∷ Select → Array String
 allNonOutputColNames (Select sql) = fold
   [ foldMap allNamesIn sql.restricts
-  , colNames (sql.groups)
+  , foldMap (runExists allNamesIn) (sql.groups)
   -- , colNames (map snd $ ordering sql)
   , case sql.source of
       Join _ on _ _ → allNamesIn on
@@ -730,9 +730,7 @@ ppSql (Select q) = do
 
   ppGroups [] = pure ""
   ppGroups grps = do
-    cls ← sequence (catMaybes <<< flip map grps $ case _ of
-      Some c → Just (ppCol c)
-      _ → Nothing)
+    cls ← sequence (map (runExists ppCol) grps)
     pure $ " GROUP BY " <> joinWith ", " cls
 
   ppJoinType LeftJoin  = "LEFT JOIN"
