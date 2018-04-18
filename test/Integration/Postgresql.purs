@@ -35,7 +35,7 @@ import Data.Record.Fold as Data.Record.Fold
 import Data.Traversable (sequence)
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..), fst)
-import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), Row1(..), Row2(..), Row6(..), Row8(..), Row9(..), execute, newPool, query, scalar, unsafeQuery, withConnection, withTransaction)
+import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), Row1(..), Row2(..), Row6(..), Row8(..), Row9(..), execute, fromSQLValue, newPool, query, scalar, unsafeQuery, withConnection, withTransaction)
 import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), Row1(..), Row2(..), Row6(..), Row8(..), Row9(..), execute, newPool, query, scalar, unsafeQuery, withConnection, withTransaction)
 import Database.PostgreSQL (class FromSQLValue, class ToSQLRow, Connection, POSTGRESQL, fromSQLValue, toSQLRow, unsafeQuery)
 import Database.PostgreSQL as Postgresql
@@ -48,7 +48,7 @@ import Test.Unit (suite) as Test.Unit
 import Test.Unit.Assert (assert, equal)
 import Test.Unit.Console (TESTOUTPUT)
 import Test.Unit.Main (runTest)
-import Type.Prelude (SProxy(..))
+import Type.Prelude (Proxy(..), SProxy(..))
 import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..), SProxy(..), reflectSymbol)
 import Type.Row (Cons, Nil, kind RowList)
 import Unsafe.Coerce (unsafeCoerce)
@@ -157,6 +157,16 @@ instance c_sqlToRecordCons
           t ← sqlToRecord (RLProxy ∷ RLProxy tail) tail
           pure (insert _name h t)
 
+class SqlToResult i o | i → o where
+  sqlToResult ∷ Proxy i → Array Foreign → Either String o
+
+instance a_sqlToResultRecord ∷ (RowToList r rl, SqlToRecord rl r') ⇒ SqlToResult (Record r) (Record r') where
+  sqlToResult _ a = sqlToRecord (RLProxy ∷ RLProxy rl) a
+
+instance b_sqlToResultOther ∷ (FromSQLValue a) ⇒ SqlToResult (Col s a) a where
+  sqlToResult _ [a] = fromSQLValue a
+  sqlToResult _ xs = Left $ "Row has " <> show (length xs) <> " fields, expecting 1."
+
 pLit ∷ ∀ a. Lit a → a
 pLit (LInt v f) = coerce f v
 pLit (LString v f) = coerce f v
@@ -164,12 +174,11 @@ pLit (LBool v f) = coerce f v
 
 run
   ∷ ∀ sql o o' ol eff
-  . FinalCols (Record o)
-  ⇒ RowToList o ol
-  ⇒ SqlToRecord ol o'
+  . FinalCols o
+  ⇒ SqlToResult o o'
   ⇒ Connection
-  → Selda.Query sql (Record o)
-  → Aff ( postgreSQL ∷ POSTGRESQL | eff ) (Array { | o' })
+  → Selda.Query sql o
+  → Aff ( postgreSQL ∷ POSTGRESQL | eff ) (Array o')
 run conn query = do
   let
     Tuple r e = compQuery 1 query
@@ -185,7 +194,7 @@ run conn query = do
   unsafeQuery conn sql params
     >>= \r → do
       pure r
-    >>= traverse (sqlToRecord (RLProxy ∷ RLProxy ol) >>> case _ of
+    >>= traverse (sqlToResult (Proxy ∷ Proxy o) >>> case _ of
       Right row → pure row
       Left  msg → throwError (error msg))
 
@@ -311,16 +320,16 @@ suite = do
                 qD = do
                   o ← select orders
                   order Desc o.id
-                  pure o
+                  pure o.id
                 qA = do
                   o ← select orders
                   order Asc o.id
-                  pure o
+                  pure o.id
               rowsA ← run conn qA
-              equal (sort ids) (map _.id rowsA)
+              equal (sort ids) rowsA
 
               rowsD ← run conn qD
-              equal (sortBy (flip compare) ids) (map _.id rowsD)
+              equal (sortBy (flip compare) ids) rowsD
           test "limiting" $ do
             withRollback conn $ do
               for_ initialOrders (insertOrder conn)
@@ -329,16 +338,16 @@ suite = do
                 q1 = limit { limit: 1, offset: 0 } do
                   o ← select orders
                   order Asc o.id
-                  pure o
+                  pure o.id
                 q2 = limit { limit: 2, offset: 0 } do
                   o ← select orders
                   order Asc o.id
-                  pure o
+                  pure o.id
               rows1 ← run conn q1
-              equal (take 1 $ sort ids) (map _.id rows1)
+              equal (take 1 $ sort ids) rows1
 
               rows2 ← run conn q2
-              equal (take 2 $ sort ids) (map _.id rows2)
+              equal (take 2 $ sort ids) rows2
 
 
 withRollback conn action = do

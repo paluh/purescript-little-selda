@@ -153,10 +153,10 @@ freshName = do
 class TableCols s (rl ∷ RowList) (r ∷ # Type) | s rl → r where
   tableCols ∷ ∀ sql. RLProxy rl → Query s (Record r)
 
-instance nilTableCols ∷ TableCols s Nil () where
+instance tableColsNil ∷ TableCols s Nil () where
   tableCols _ = pure {}
 
-instance consTableCols
+instance tableColsCons
   ∷ ( TableCols s tail r'
     , IsSymbol name
     , RowLacks name r'
@@ -173,13 +173,14 @@ instance consTableCols
 newtype Col s a = Col (Exp Select a)
 newtype Cols s (r ∷ # Type) = Cols (Record r)
 
+-- | XXX: Rename this to RecordOuterCols
 class OuterCols s (il ∷ RowList) (i ∷ #Type) (o ∷ #Type) | i il → o where
   outer ∷ Proxy s → RLProxy il → Record i → Record o
 
-instance nilOuterCols ∷ OuterCols s Nil r () where
+instance a_outerColsNil ∷ OuterCols s Nil r () where
   outer _ _ _ = {}
 
-instance consOuterCols
+instance b_outerColsCons
   ∷ ( OuterCols s tail i o'
     , IsSymbol name
     , RowLacks name o'
@@ -195,6 +196,16 @@ instance consOuterCols
       o = outer s (RLProxy ∷ RLProxy tail) i
     in
       Data.Record.insert _name (Col v) o
+
+-- | XXX: Rename this to OuterCols
+class AnyOuterCols s i o | i → o where
+  outer' ∷ Proxy s → i → o
+
+instance c_outerColsRecord ∷ (RowToList i il, OuterCols s il i o) ⇒ AnyOuterCols s {|i} {|o} where
+  outer' s i = outer s (RLProxy ∷ RLProxy il) i
+
+instance d_outerColsOther ∷ AnyOuterCols s (Col (Inner s) a) (Col s a) where
+  outer' _ (Col e) = Col e
 
 select
   ∷ ∀ c cl cs r s tc tcl
@@ -436,11 +447,10 @@ groupBy (Col c) = Query $ do
 
 limit
   ∷ ∀ a a' al s
-  . OuterCols s al a a'
-  ⇒ RowToList a al
+  . AnyOuterCols s a a'
   ⇒ { limit ∷ Int, offset ∷ Int }
-  → Query (Inner s) {|a}
-  → Query s {|a'}
+  → Query (Inner s) a
+  → Query s a'
 limit l q = do
   { genState: qSt, a } ← Query $ isolate q
   st ← Query get
@@ -449,8 +459,7 @@ limit l q = do
       [Select sql] | isNothing sql.limits → sql
       ss → unwrap $ sqlFrom' (allCols ss) (Product ss) id
   Query $ put $ st { sources = Select (sql' { limits = Just l }) : st.sources }
-  pure $ outer (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy al) a
-
+  pure $ outer' (Proxy ∷ Proxy s) a
 
 order ∷ ∀ a s. Order → Col s a → Query s Unit
 order order (Col exp) = do
