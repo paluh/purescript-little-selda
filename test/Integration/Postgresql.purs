@@ -40,7 +40,7 @@ import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), 
 import Database.PostgreSQL (class FromSQLValue, class ToSQLRow, Connection, POSTGRESQL, fromSQLValue, toSQLRow, unsafeQuery)
 import Database.PostgreSQL as Postgresql
 import Database.PostgreSQL as Postgresql
-import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), Col(..), Exp(..), JoinType(..), Lit(..), Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compQuery, count, groupBy, innerJoin, limit, order, ppSql, restrict, runQuery, select, state2sql)
+import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), C, Col(..), Exp(..), JoinType(..), Lit(..), NoDbDefault, Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compInsert, compQuery, count, groupBy, innerJoin, limit, order, ppSql, restrict, runQuery, select, state2sql)
 import Database.Selda.Little as Selda
 import Debug.Trace (traceAnyA)
 import Test.Unit (TestSuite, test)
@@ -48,8 +48,8 @@ import Test.Unit (suite) as Test.Unit
 import Test.Unit.Assert (assert, equal)
 import Test.Unit.Console (TESTOUTPUT)
 import Test.Unit.Main (runTest)
-import Type.Prelude (Proxy(..), SProxy(..))
 import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..), SProxy(..), reflectSymbol)
+import Type.Prelude (class ListToRow, Proxy(..), SProxy(..))
 import Type.Row (Cons, Nil, kind RowList)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -94,7 +94,7 @@ dbSql = Postgresql.Query """
     billingFullName TEXT NOT NULL,
     billingHomeNumber TEXT NOT NULL,
     billingPostalCode TEXT NOT NULL,
-    id INTEGER PRIMARY KEY
+    id SERIAL PRIMARY KEY
   );
   CREATE TEMPORARY TABLE orderItem (
     orderId INTEGER PRIMARY KEY REFERENCES "orders" UNIQUE,
@@ -198,19 +198,27 @@ run conn query = do
       Right row → pure row
       Left  msg → throwError (error msg))
 
-orders ∷ Table
-  ( billingAddress :: String
-  , billingCity :: String
-  , billingCompanyName :: String
-  , billingCompanyTaxId :: String
-  , billingFlatNumber :: Maybe String
-  , billingFullName :: String
-  , billingHomeNumber :: String
-  , billingPostalCode :: String
-  -- Why String?
-  , id ∷ Int
+orders' ∷ Table
+  ( billingAddress :: C NoDbDefault String
+  , billingCity :: C NoDbDefault String
+  , billingCompanyName :: C NoDbDefault String
+  , billingCompanyTaxId :: C NoDbDefault String
+  , billingFlatNumber :: C NoDbDefault (Maybe String)
+  , billingFullName :: C NoDbDefault String
+  , billingHomeNumber :: C NoDbDefault String
+  , billingPostalCode :: C NoDbDefault String
+  , id ∷ C NoDbDefault Int
   )
-orders = Table "orders"
+orders' = Table "orders"
+
+class PlainTable (rl ∷ RowList) (pl ∷ RowList ) | rl → pl
+instance plainTableNil ∷ PlainTable Nil Nil
+instance plainTableCons ∷ (PlainTable tail tail') ⇒ PlainTable (Cons name (C d a) tail) (Cons name a tail')
+
+plain ∷ ∀ p pl r rl. RowToList r rl ⇒ PlainTable rl pl ⇒ ListToRow pl p ⇒ Table r → Table p
+plain (Table n) = Table n
+
+orders = plain orders'
 
 
 -- | XXX: Read config file from env
@@ -279,6 +287,7 @@ suite = do
           , id: 3
           }
         ]
+    traceAnyA (compInsert orders' initialOrders)
     liftEff $ runTest $ do
       Test.Unit.suite "Integration.Postgresql" $ do
         Test.Unit.suite "single table" $ do

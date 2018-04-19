@@ -2,12 +2,13 @@ module Database.Selda.Little where
 
 import Prelude
 
-import Control.Monad.State (State, get, modify, put, runState)
+import Control.Monad.List.Trans (foldl)
+import Control.Monad.State (State, execState, get, modify, put, runState)
 import Data.Array (any, catMaybes, elem, filter, reverse, (:))
 import Data.Exists (Exists, mkExists, runExists)
-import Data.Foldable (fold, foldMap)
+import Data.Foldable (fold, foldMap, foldr)
 import Data.Leibniz (type (~))
-import Data.Maybe (Maybe(..), isNothing)
+import Data.Maybe (Maybe(..), isNothing, maybe)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Record as Data.Record
 import Data.String (joinWith)
@@ -262,10 +263,7 @@ aggregate
   → Query s (Record rc)
 aggregate q = do
   { genState, a: aggrs } ← Query $ isolate q
-  traceAnyA aggrs
-  traceAnyA genState
   { result, cols } ← renameImpl (RLProxy ∷ RLProxy cl) $ unAggrs (RLProxy ∷ RLProxy al) aggrs
-  traceAnyA cols
   let
     sql = sqlFrom' cols (Product [state2sql genState]) _{ groups = genState.groupCols }
   Query (modify $ \st → st {sources = sql : st.sources })
@@ -528,6 +526,192 @@ compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [
 type SomeCol' = SomeCol Select
 type ColName = String
 
+
+foreign import kind DbDefault
+foreign import data DbDefault ∷ DbDefault
+foreign import data DbAuto ∷ DbDefault
+foreign import data NoDbDefault ∷ DbDefault
+
+foreign import data C ∷ DbDefault → Type → Type
+
+insertDef = { tl: RLProxy, il: RLProxy }
+
+class Insert (tl ∷ RowList) (il ∷ RowList) where
+  insert ∷ { tl ∷ RLProxy tl, il ∷ RLProxy il}
+
+instance insertNil ∷ Insert Nil Nil where
+  insert = insertDef
+instance b_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault a) tl) (Cons name a il) where
+  insert = insertDef
+instance c_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault a) tl) il where
+  insert = insertDef
+instance d_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) (Cons name (Maybe a) il) where
+  insert = insertDef
+instance f_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) il where
+  insert = insertDef
+instance g_insertNoDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault a) tl) (Cons name a il) where
+  insert = insertDef
+instance h_insertNoDbDefaultCons ∷ (Insert tl il) ⇒ Insert (Cons name (C DbAuto a) tl) il where
+  insert = insertDef
+
+
+defMissing ∷ { tl ∷ RLProxy (Cons "field" (C DbDefault Int) Nil), il ∷ RLProxy Nil }
+defMissing = insert
+
+defNotMissing ∷ { tl ∷ RLProxy (Cons "field" (C DbDefault Int) Nil), il ∷ RLProxy (Cons "field" Int Nil) }
+defNotMissing = insert
+
+nullableNotMissingMaybe ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault (Maybe Int)) Nil), il ∷ RLProxy (Cons "field" (Maybe Int) Nil) }
+nullableNotMissingMaybe = insert
+
+nullableMissing ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault (Maybe Int)) Nil), il ∷ RLProxy Nil }
+nullableMissing = insert
+
+-- noDefMissing ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault Int) Nil), il ∷ RLProxy Nil }
+-- noDefMissing = insert
+
+noDefNotMissing ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault Int) Nil), il ∷ RLProxy (Cons "field" Int Nil) }
+noDefNotMissing = insert
+
+-- autoNotMissing ∷ { tl ∷ RLProxy (Cons "field" (C (DbAuto Int)) Nil), il ∷ RLProxy (Cons "field" Int Nil) }
+-- autoNotMissing = insert
+
+singleAutoMissing ∷ { tl ∷ RLProxy (Cons "field" (C DbAuto Int) Nil), il ∷ RLProxy Nil }
+singleAutoMissing = insert
+
+mixed
+  ∷ { tl ∷ RLProxy
+        ( Cons "field1" (C DbAuto Int)
+        ( Cons "field2" (C DbDefault Int)
+        ( Cons "field3" (C NoDbDefault Int)
+          Nil
+        )))
+    , il ∷ RLProxy (Cons "field3" Int Nil)
+    }
+mixed = insert
+
+class InsertRow (il ∷ RowList) (i ∷ # Type) where
+  insertRow ∷ RLProxy il → Record i → State (InsertContext String) Unit
+
+instance a_insertRowNil ∷ InsertRow Nil i where
+  insertRow _ _ = pure unit
+
+instance b_insertRowConsMaybe
+  ∷ ( RowCons name (Maybe a) r' r
+    , Show a
+    , IsSymbol name
+    , InsertRow tail r
+    )
+  ⇒ InsertRow (Cons name (Maybe a) tail) r
+  where
+  insertRow _ r = do
+    let _name = SProxy ∷ SProxy name
+    insertRow (RLProxy ∷ RLProxy tail) r
+    modify
+      \s →
+        { params: maybe "NULL" show (Data.Record.get _name r) : s.params
+        , args: ("$" <> show s.index) : s.args
+        , index: s.index + 1
+        }
+
+instance c_insertRowCons
+  ∷ ( RowCons name a r' r
+    , Show a
+    , IsSymbol name
+    , InsertRow tail r
+    )
+  ⇒ InsertRow (Cons name a tail) r
+  where
+  insertRow _ r = do
+    let _name = SProxy ∷ SProxy name
+    insertRow (RLProxy ∷ RLProxy tail) r
+    modify
+      \s →
+        { params: show (Data.Record.get _name r) : s.params
+        , args: ("$" <> show s.index) : s.args
+        , index: s.index + 1
+        }
+
+class InsertCols (il ∷ RowList) where
+  insertColNames ∷ RLProxy il → Array String
+
+instance insertColsNil ∷ InsertCols Nil where
+  insertColNames _ = []
+
+instance insertColsCons
+  ∷ ( IsSymbol name
+    , InsertCols tail
+    )
+  ⇒ InsertCols (Cons name a tail)
+  where
+  insertColNames _ = reflectSymbol (SProxy ∷ SProxy name) : insertColNames (RLProxy ∷ RLProxy tail)
+
+type InsertContext arg  =
+  { params ∷ Array String
+  , args ∷ Array arg
+  , index ∷ Int
+  }
+
+insertContext ∷ ∀ r rl. InsertRow rl r ⇒ RowToList r rl ⇒ Array {|r} → InsertContext (Array String)
+insertContext =
+  let
+    rl = RLProxy ∷ RLProxy rl
+    step r { args, params, index } =
+      let
+        { args: argsRow, index: index', params: params' } = execState (insertRow rl r) { args: [], index, params }
+      in
+        { args: argsRow : args, index: index', params: params' }
+  in
+    foldr step { params: [], args: [], index: 1}
+
+fromColName :: String -> String
+fromColName cn = "\"" <> escapeQuotes cn <> "\""
+
+compInsert ∷ ∀ i il t tl. RowToList t tl ⇒ RowToList i il ⇒ Insert tl il ⇒ InsertCols il ⇒ InsertRow il i ⇒ Table t → Array (Record i) → { query ∷ String, params∷ Array String } -- (Text, [Param])
+compInsert (Table name) i = { query, params }
+  where
+  il = RLProxy ∷ RLProxy il
+  cols = insertColNames il
+  { args, params } = insertContext i
+  args' = foldMap (\v -> "(" <> joinWith ", " v <> "),\n") args
+  query = joinWith "\n"
+    [ "INSERT INTO"
+    , name
+    , "(" <>  joinWith ", " (map fromColName cols) <> ")\n"
+    , "VALUES"
+    , args'
+    ]
+
+--     -- Build all rows: just recurse over the list of defaults (which encodes
+--     -- the # of elements in total as well), building each row, keeping track
+--     -- of the next parameter identifier.
+--     mkRows n (ps:pss) rts paramss =
+--       case mkRow n ps (tableCols tbl) of
+--         (n', names, params) → mkRows n' pss (rowText:rts) (params:paramss)
+--           where rowText = "(" <> Text.intercalate ", " (reverse names) <> ")"
+--     mkRows _ _ rts ps =
+--       (reverse rts, reverse $ concat ps)
+
+    -- Build a row: use the NULL/DEFAULT keyword for default rows, otherwise
+    -- use a parameter.
+    -- mkRow n ps names = foldl' mkCols (n, [], []) (zip ps names)
+-- 
+-- compileInsert ∷ Insert a ⇒ PPConfig → Table a → [a] → [(Text, [Param])]
+-- compileInsert _ _ [] =
+--   [(empty, [])]
+-- compileInsert cfg tbl rows =
+--     case ppMaxInsertParams cfg of
+--       Nothing → [compInsert cfg tbl rows']
+--       Just n  → map (compInsert cfg tbl) (chunk (n `div` rowlen) rows')
+--   where
+--     rows' = map params rows
+--     rowlen = length (head rows')
+--     chunk chunksize xs =
+--       case splitAt chunksize xs of
+--         ([], []) → []
+--         (x, [])  → [x]
+--         (x, xs') → x : chunk chunksize xs'
+
 allNonOutputColNames ∷ Select → Array String
 allNonOutputColNames (Select sql) = fold
   [ foldMap allNamesIn sql.restricts
@@ -584,7 +768,7 @@ colNames cs = do
     Named n c → n : allNamesIn c
 
 
-allNamesIn ∷ forall a s. Exp s a → Array String
+allNamesIn ∷ ∀ a s. Exp s a → Array String
 allNamesIn (TableCol ns) = ns
 allNamesIn (Column n) = [n]
 allNamesIn (Literal _) = []
