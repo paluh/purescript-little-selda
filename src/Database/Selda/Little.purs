@@ -7,6 +7,7 @@ import Control.Monad.State (State, execState, get, modify, put, runState)
 import Data.Array (any, catMaybes, elem, filter, reverse, (:))
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (fold, foldMap, foldr)
+import Data.Foreign (Foreign, toForeign)
 import Data.Leibniz (type (~))
 import Data.Maybe (Maybe(..), isNothing, maybe)
 import Data.Newtype (class Newtype, unwrap)
@@ -14,7 +15,9 @@ import Data.Record as Data.Record
 import Data.String (joinWith)
 import Data.Traversable (for, sequence, traverse)
 import Data.Tuple (Tuple(..))
+import Database.PostgreSQL (null)
 import Debug.Trace (traceAnyA)
+import Node.Buffer (write)
 import Partial.Unsafe (unsafeCrashWith)
 import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..), SProxy(..), reflectSymbol)
 import Type.Proxy (Proxy(..))
@@ -545,11 +548,11 @@ instance b_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault
   insert = insertDef
 instance c_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault a) tl) il where
   insert = insertDef
-instance d_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) (Cons name (Maybe a) il) where
+--instance d_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) (Cons name (Maybe a) il) where
+--   insert = insertDef
+instance d_insertNoDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault a) tl) (Cons name a il) where
   insert = insertDef
 instance f_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) il where
-  insert = insertDef
-instance g_insertNoDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault a) tl) (Cons name a il) where
   insert = insertDef
 instance h_insertNoDbDefaultCons ∷ (Insert tl il) ⇒ Insert (Cons name (C DbAuto a) tl) il where
   insert = insertDef
@@ -583,10 +586,15 @@ mixed
   ∷ { tl ∷ RLProxy
         ( Cons "field1" (C DbAuto Int)
         ( Cons "field2" (C DbDefault Int)
-        ( Cons "field3" (C NoDbDefault Int)
+        ( Cons "field3" (C NoDbDefault (Maybe Int))
+        ( Cons "field4" (C NoDbDefault Int)
           Nil
-        )))
-    , il ∷ RLProxy (Cons "field3" Int Nil)
+        ))))
+    , il ∷ RLProxy
+        ( Cons "field3" (Maybe Int)
+        ( Cons "field4" Int
+          Nil
+        ))
     }
 mixed = insert
 
@@ -598,7 +606,6 @@ instance a_insertRowNil ∷ InsertRow Nil i where
 
 instance b_insertRowConsMaybe
   ∷ ( RowCons name (Maybe a) r' r
-    , Show a
     , IsSymbol name
     , InsertRow tail r
     )
@@ -609,14 +616,13 @@ instance b_insertRowConsMaybe
     insertRow (RLProxy ∷ RLProxy tail) r
     modify
       \s →
-        { params: maybe "NULL" show (Data.Record.get _name r) : s.params
+        { params: maybe null toForeign (Data.Record.get _name r) : s.params
         , args: ("$" <> show s.index) : s.args
         , index: s.index + 1
         }
 
 instance c_insertRowCons
   ∷ ( RowCons name a r' r
-    , Show a
     , IsSymbol name
     , InsertRow tail r
     )
@@ -627,7 +633,7 @@ instance c_insertRowCons
     insertRow (RLProxy ∷ RLProxy tail) r
     modify
       \s →
-        { params: show (Data.Record.get _name r) : s.params
+        { params: toForeign (Data.Record.get _name r) : s.params
         , args: ("$" <> show s.index) : s.args
         , index: s.index + 1
         }
@@ -647,7 +653,7 @@ instance insertColsCons
   insertColNames _ = reflectSymbol (SProxy ∷ SProxy name) : insertColNames (RLProxy ∷ RLProxy tail)
 
 type InsertContext arg  =
-  { params ∷ Array String
+  { params ∷ Array Foreign
   , args ∷ Array arg
   , index ∷ Int
   }
@@ -667,17 +673,17 @@ insertContext =
 fromColName :: String -> String
 fromColName cn = "\"" <> escapeQuotes cn <> "\""
 
-compInsert ∷ ∀ i il t tl. RowToList t tl ⇒ RowToList i il ⇒ Insert tl il ⇒ InsertCols il ⇒ InsertRow il i ⇒ Table t → Array (Record i) → { query ∷ String, params∷ Array String } -- (Text, [Param])
+compInsert ∷ ∀ i il t tl. RowToList t tl ⇒ RowToList i il ⇒ Insert tl il ⇒ InsertCols il ⇒ InsertRow il i ⇒ Table t → Array (Record i) → { query ∷ String, params∷ Array Foreign } -- (Text, [Param])
 compInsert (Table name) i = { query, params }
   where
   il = RLProxy ∷ RLProxy il
   cols = insertColNames il
   { args, params } = insertContext i
-  args' = foldMap (\v -> "(" <> joinWith ", " v <> "),\n") args
+  args' = joinWith ",\n" <<< map (\v -> "(" <> joinWith ", " (reverse v) <> ")") <<< reverse $ args
   query = joinWith "\n"
     [ "INSERT INTO"
     , name
-    , "(" <>  joinWith ", " (map fromColName cols) <> ")\n"
+    , "(" <>  joinWith ", " cols <> ")\n"
     , "VALUES"
     , args'
     ]

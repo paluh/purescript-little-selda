@@ -11,8 +11,7 @@ import Control.Monad.Eff (Eff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Class (liftEff)
-import Control.Monad.Eff.Console (CONSOLE, log)
-import Control.Monad.Eff.Exception (EXCEPTION, error)
+import Control.Monad.Eff.Console (CONSOLE)
 import Control.Monad.Eff.Exception (error)
 import Control.Monad.Error.Class (throwError, try)
 import Control.Monad.Except (throwError)
@@ -40,7 +39,7 @@ import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), 
 import Database.PostgreSQL (class FromSQLValue, class ToSQLRow, Connection, POSTGRESQL, fromSQLValue, toSQLRow, unsafeQuery)
 import Database.PostgreSQL as Postgresql
 import Database.PostgreSQL as Postgresql
-import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), C, Col(..), Exp(..), JoinType(..), Lit(..), NoDbDefault, Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compInsert, compQuery, count, groupBy, innerJoin, limit, order, ppSql, restrict, runQuery, select, state2sql)
+import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), C, Col(..), DbAuto, Exp(..), JoinType(..), Lit(..), NoDbDefault, Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compInsert, compQuery, count, groupBy, innerJoin, limit, order, ppSql, restrict, runQuery, select, state2sql)
 import Database.Selda.Little as Selda
 import Debug.Trace (traceAnyA)
 import Test.Unit (TestSuite, test)
@@ -70,11 +69,12 @@ instance eqStep ::
   ) => Step EqS lbl a (AppCat ((->) (Record r)) (->) Boolean Boolean) where
   step _ lbl val = AppCat \other res -> res && get lbl other == val
 
+-- compare subrecord
 rEq
-  :: forall row list
+  :: forall row row' list
    . RowToList row list
-  => Fold EqS list row (AppCat ((->) (Record row)) (->) Boolean Boolean)
-  => Record row -> Record row -> Boolean
+  => Fold EqS list row (AppCat ((->) (Record row')) (->) Boolean Boolean)
+  => Record row -> Record row' -> Boolean
 rEq r1 r2 =
   let
     list = RLProxy :: RLProxy list
@@ -90,7 +90,7 @@ dbSql = Postgresql.Query """
     billingCity TEXT NOT NULL,
     billingCompanyName TEXT,
     billingCompanyTaxId TEXT,
-    billingFlatNumber TEXT,
+    billingFlatNumber TEXT NULL,
     billingFullName TEXT NOT NULL,
     billingHomeNumber TEXT NOT NULL,
     billingPostalCode TEXT NOT NULL,
@@ -207,7 +207,7 @@ orders' ∷ Table
   , billingFullName :: C NoDbDefault String
   , billingHomeNumber :: C NoDbDefault String
   , billingPostalCode :: C NoDbDefault String
-  , id ∷ C NoDbDefault Int
+  , id ∷ C DbAuto Int
   )
 orders' = Table "orders"
 
@@ -260,40 +260,39 @@ suite = do
           , billingCity: "Gubin"
           , billingCompanyName: "plintel-z"
           , billingCompanyTaxId: "8861577777"
-          , billingFlatNumber: Just "1"
+          , billingFlatNumber: Nothing
           , billingFullName: "Gościsław B"
           , billingHomeNumber: "2"
           , billingPostalCode: "88-260"
-          , id: 1
           }
         , { billingAddress: "Zwycięstwa"
           , billingCity: "Gubin"
           , billingCompanyName: "fingerbimber"
           , billingCompanyTaxId: "886157999"
-          , billingFlatNumber: Just "1"
+          , billingFlatNumber: Nothing
           , billingFullName: "Rymasz Tomarczyk"
           , billingHomeNumber: "20"
           , billingPostalCode: "88-260"
-          , id: 2
           }
         , { billingAddress: "Pana Jawła VIVIVI"
           , billingCity: "Osesek"
           , billingCompanyName: "bimberbau"
           , billingCompanyTaxId: "92615777"
-          , billingFlatNumber: Just "2"
+          , billingFlatNumber: Nothing ∷ Maybe String
           , billingFullName: "Tymasz Romarczyk"
           , billingHomeNumber: "88"
           , billingPostalCode: "66-666"
-          , id: 3
           }
         ]
-    traceAnyA (compInsert orders' initialOrders)
+    let
+      { query, params } = compInsert orders' initialOrders
+
     liftEff $ runTest $ do
       Test.Unit.suite "Integration.Postgresql" $ do
         Test.Unit.suite "single table" $ do
           test "select all rows" $ do
             withRollback conn do
-              for_ initialOrders (insertOrder conn)
+              _ ← unsafeQuery conn query params
               let
                 allOrders = select orders
               rows ← run conn allOrders
@@ -301,11 +300,11 @@ suite = do
               assert
                 "all rows found"
                 (all (\(Tuple o1 o2) → rEq o1 o2)
-                  (zip (sortBy (\o1 o2 → o1.id `compare` o2.id) rows) initialOrders))
+                  (zip initialOrders (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
 
           test "restricting by simple prediate" $ do
             withRollback conn $ do
-              for_ initialOrders (insertOrder conn)
+              _ ← unsafeQuery conn query params
               let
                 gubin = "Gubin"
                 ordersFromGubin = do
@@ -323,9 +322,11 @@ suite = do
                   (zip expected (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
           test "ordering by single column" $ do
             withRollback conn $ do
-              for_ initialOrders (insertOrder conn)
+              _ ← unsafeQuery conn query params
+              ids ← run conn $ do
+                o ← select orders
+                pure o.id
               let
-                ids = map _.id initialOrders
                 qD = do
                   o ← select orders
                   order Desc o.id
@@ -341,9 +342,11 @@ suite = do
               equal (sortBy (flip compare) ids) rowsD
           test "limiting" $ do
             withRollback conn $ do
-              for_ initialOrders (insertOrder conn)
+              _ ← unsafeQuery conn query params
+              ids ← run conn $ do
+                o ← select orders
+                pure o.id
               let
-                ids = map _.id initialOrders
                 q1 = limit { limit: 1, offset: 0 } do
                   o ← select orders
                   order Asc o.id
