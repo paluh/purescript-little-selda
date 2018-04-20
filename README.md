@@ -14,7 +14,7 @@ $ pulp test --main 'Test.Integration'
 
 - [x] Basic table representation
 - [ ] Table/schema validation function (for postgresql)
-- [x] Select from table
+- [x] Basic select from table
 - [x] Restrict (`WHERE` clause)
 - [x] Limit
 - [x] Order
@@ -22,7 +22,7 @@ $ pulp test --main 'Test.Integration'
 - [x] Inner Join
 - [x] Group by
 - [x] Aggregation functions
-- [ ] Insert
+- [x] Insert (prototype is specialized to postgresql with RETURNING)
 - [ ] Delete
 - [ ] Update
 - [ ] Upsert

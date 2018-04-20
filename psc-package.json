@@ -3,6 +3,7 @@
   "set": "selda",
   "source": "https://github.com/lambdaterms/package-sets.git",
   "depends": [
+    "record-fold",
     "assert",
     "console",
     "debug",
@@ -13,7 +14,6 @@
     "prelude",
     "psci-support",
     "record",
-    "record-fold",
     "strings",
     "test-unit",
     "transformers",

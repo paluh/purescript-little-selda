@@ -2,7 +2,6 @@ module Database.Selda.Little where
 
 import Prelude
 
-import Control.Monad.List.Trans (foldl)
 import Control.Monad.State (State, execState, get, modify, put, runState)
 import Data.Array (any, catMaybes, elem, filter, reverse, (:))
 import Data.Exists (Exists, mkExists, runExists)
@@ -16,8 +15,6 @@ import Data.String (joinWith)
 import Data.Traversable (for, sequence, traverse)
 import Data.Tuple (Tuple(..))
 import Database.PostgreSQL (null)
-import Debug.Trace (traceAnyA)
-import Node.Buffer (write)
 import Partial.Unsafe (unsafeCrashWith)
 import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..), SProxy(..), reflectSymbol)
 import Type.Proxy (Proxy(..))
@@ -602,7 +599,7 @@ newtype InsertQuery (result ∷ RowList)
     }
 
 compInsert
-  ∷ ∀ cs i il t tl tl'
+  ∷ ∀ cs i il t tl tl' t'
   . RowToList t tl
   ⇒ PlainTable tl tl'
   ⇒ InsertCols tl'

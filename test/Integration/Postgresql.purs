@@ -30,7 +30,7 @@ import Data.Newtype (class Newtype, unwrap)
 import Data.Newtype (unwrap)
 import Data.Record (get)
 import Data.Record as Data.Record
-import Data.Record.Fold (class Fold, class Step)
+import Data.Record.Fold (class Fold, class Step, rEq)
 import Data.Record.Fold as Data.Record.Fold
 import Data.Traversable (sequence)
 import Data.Traversable (traverse)
@@ -53,36 +53,6 @@ import Type.Prelude (class IsSymbol, class RowLacks, class RowToList, RLProxy(..
 import Type.Prelude (class ListToRow, Proxy(..), SProxy(..))
 import Type.Row (Cons, Nil, kind RowList)
 import Unsafe.Coerce (unsafeCoerce)
-
-newtype AppCat app cat a b = AppCat (app (cat a b))
-
-instance semigroupoidAppCat :: (Semigroupoid cat, Applicative app) => Semigroupoid (AppCat app cat) where
-  compose (AppCat a1) (AppCat a2) = AppCat $ (<<<) <$> a1 <*> a2
-
-instance categoryAppCat :: (Category cat, Applicative app) => Category (AppCat app cat) where
-  id = AppCat (pure id)
-
-data EqS = EqS
-
-instance eqStep ::
-  ( RowCons lbl a r' r
-  , IsSymbol lbl
-  , Eq a
-  ) => Step EqS lbl a (AppCat ((->) (Record r)) (->) Boolean Boolean) where
-  step _ lbl val = AppCat \other res -> res && get lbl other == val
-
--- compare subrecord
-rEq
-  :: forall row row' list
-   . RowToList row list
-  => Fold EqS list row (AppCat ((->) (Record row')) (->) Boolean Boolean)
-  => Record row -> Record row' -> Boolean
-rEq r1 r2 =
-  let
-    list = RLProxy :: RLProxy list
-    AppCat run = Data.Record.Fold.fold EqS list r1
-  in
-    run r2 true
 
 
 -- dbSql ∷ String
@@ -219,9 +189,18 @@ orders' = Table "orders"
 plain ∷ ∀ p pl r rl. RowToList r rl ⇒ PlainTable rl pl ⇒ ListToRow pl p ⇒ Table r → Table p
 plain (Table n) = Table n
 
+orders :: Table
+   ( billingAddress :: String
+   , billingCity :: String
+   , billingCompanyName :: String
+   , billingCompanyTaxId :: String
+   , billingFlatNumber :: Maybe String
+   , billingFullName :: String
+   , billingHomeNumber :: String
+   , billingPostalCode :: String
+   , id :: Int
+   )
 orders = plain orders'
-
--- foreign import debugger ∷ ∀ eff. Eff eff Unit
 
 
 -- | XXX: Read config file from env
@@ -329,10 +308,9 @@ suite = do
                 allOrders = select orders
               rows ← run conn allOrders
               equal (length rows) (length initialOrders)
-              -- liftEff debugger
               assert
                 "all rows found"
-                (all (\(Tuple o1 o2) → rEq o1 o2)
+                (all (\(Tuple o1 o2) → o1.billingFullName == o2.billingFullName)
                   (zip initialOrders (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
               assert
                 "fetches null values too"
@@ -349,15 +327,19 @@ suite = do
                   o ← select orders
                   restrict (o.billingCity `eq` lStr gubin)
                   pure o
-                expected =
-                  filter ((gubin == _) <<< _.billingCity) initialOrders
+                expected
+                  = map (Data.Record.insert (SProxy ∷ SProxy "billingFlatNumber") Nothing)
+                  <<< filter ((gubin == _) <<< _.billingCity)
+                  $ initialOrders
               rows ← run conn ordersFromGubin
+              let
+                rows' = map (Data.Record.delete (SProxy ∷ SProxy "id")) ((sortBy (\o1 o2 → o1.id `compare` o2.id)) rows)
               equal (length expected) (length rows)
               assert
                 "filtered rows found"
                 (all
-                  (\(Tuple o1 o2) → rEq o1 o2)
-                  (zip expected (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
+                  (\(Tuple o1 o2) → rEq o2 o1)
+                  (zip expected rows'))
           test "ordering by single column" $ do
             withRollback conn $ do
               void $ insert conn orders' initialOrders
