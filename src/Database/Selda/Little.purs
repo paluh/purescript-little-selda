@@ -152,13 +152,11 @@ freshName = do
   n ← freshId
   pure $ "tmp_" <> show n
 
--- XXX: We probably want to process some input record
---      with some isos here (dbType ←→ psType)
-class TableCols s (rl ∷ RowList) (r ∷ # Type) | s rl → r where
-  tableCols ∷ ∀ sql. RLProxy rl → Query s (Record r)
+class TableCols s (rl ∷ RowList) (r ∷ # Type) | rl → r where
+  tableCols ∷ ∀ sql. Proxy s → RLProxy rl → Record r
 
 instance tableColsNil ∷ TableCols s Nil () where
-  tableCols _ = pure {}
+  tableCols _ _ = {}
 
 instance tableColsCons
   ∷ ( TableCols s tail r'
@@ -168,11 +166,12 @@ instance tableColsCons
     )
   ⇒ TableCols s (Cons name a tail) r
   where
-  tableCols _ = do
+  tableCols s _ =
     let
       _name = (SProxy ∷ SProxy name)
-    result ← tableCols (RLProxy ∷ RLProxy tail)
-    pure $ Data.Record.insert _name (Col (Column (reflectSymbol _name))) result
+      result = tableCols s (RLProxy ∷ RLProxy tail)
+    in
+      Data.Record.insert _name (Col (Column (reflectSymbol _name))) result
 
 newtype Col s a = Col (Exp Select a)
 newtype Cols s (r ∷ # Type) = Cols (Record r)
@@ -220,7 +219,7 @@ select
   ⇒ Table c
   → Query s (Record r)
 select (Table name) = do
-  tc ← tableCols (RLProxy ∷ RLProxy cl)
+  let tc = tableCols (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy cl)
   { result, cols } ← renameImpl (RLProxy ∷ RLProxy tcl) tc
   st ← Query get
   Query (put $ st { sources = sqlFrom cols (TableName name) [] : st.sources })
@@ -339,35 +338,6 @@ innerJoin check inner = do
         _ → Nothing) innerUntyped)
   Query $ put (st {sources = [sqlFrom' outCols (Join InnerJoin on left right) id]})
   pure innerTyped
-
--- | `a` is our scoped result which we want to use
--- |     inside check and finally return
--- | `a` --|outer|--> `o`
--- someJoin
---   ∷ ∀ a al ar o ol or s
---   . RowToList a al
---   ⇒ OuterCols s al a o
---   ⇒ RowToList o ol
---   ⇒ Rename s ol o or
---   ⇒ JoinType
---   → (Record or → Col s Boolean)
---   → Query (Inner s) (Record a)
---   → Query s (Record or)
--- someJoin jointype check inner = do
---   { genState: innerSt, a: inner' } ← Query $ isolate inner
---   let
---     o = outer (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy al) inner'
---   { result: innerTyped, cols: innerUntyped } ← renameImpl (RLProxy ∷ RLProxy ol) o
---   st ← Query get
---   let
---     left = state2sql st
---     right = sqlFrom' innerUntyped (Product [state2sql innerSt]) id
---     Col on = check innerTyped
---     outCols =  allCols [left] <> (catMaybes $ map (case _ of
---         Named n _ → Just (Some (Column n))
---         _ → Nothing) innerUntyped)
---   Query $ put (st {sources = [sqlFrom' outCols (Join jointype on left right) id]})
---   pure innerTyped
 
 class Aggregates (il ∷ RowList) (i ∷ # Type) (o ∷ # Type) | il i → o where
   unAggrs ∷ RLProxy il → Record i → Record o
@@ -529,7 +499,6 @@ compQuery ns q = Tuple st.nameSupply (Select { columns: final, source: Product [
 type SomeCol' = SomeCol Select
 type ColName = String
 
-
 foreign import kind DbDefault
 foreign import data DbDefault ∷ DbDefault
 foreign import data DbAuto ∷ DbDefault
@@ -537,66 +506,13 @@ foreign import data NoDbDefault ∷ DbDefault
 
 foreign import data C ∷ DbDefault → Type → Type
 
-insertDef = { tl: RLProxy, il: RLProxy }
-
-class Insert (tl ∷ RowList) (il ∷ RowList) where
-  insert ∷ { tl ∷ RLProxy tl, il ∷ RLProxy il}
-
-instance insertNil ∷ Insert Nil Nil where
-  insert = insertDef
-instance b_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault a) tl) (Cons name a il) where
-  insert = insertDef
-instance c_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault a) tl) il where
-  insert = insertDef
---instance d_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) (Cons name (Maybe a) il) where
---   insert = insertDef
-instance d_insertNoDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault a) tl) (Cons name a il) where
-  insert = insertDef
-instance f_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) il where
-  insert = insertDef
-instance h_insertNoDbDefaultCons ∷ (Insert tl il) ⇒ Insert (Cons name (C DbAuto a) tl) il where
-  insert = insertDef
-
-
-defMissing ∷ { tl ∷ RLProxy (Cons "field" (C DbDefault Int) Nil), il ∷ RLProxy Nil }
-defMissing = insert
-
-defNotMissing ∷ { tl ∷ RLProxy (Cons "field" (C DbDefault Int) Nil), il ∷ RLProxy (Cons "field" Int Nil) }
-defNotMissing = insert
-
-nullableNotMissingMaybe ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault (Maybe Int)) Nil), il ∷ RLProxy (Cons "field" (Maybe Int) Nil) }
-nullableNotMissingMaybe = insert
-
-nullableMissing ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault (Maybe Int)) Nil), il ∷ RLProxy Nil }
-nullableMissing = insert
-
--- noDefMissing ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault Int) Nil), il ∷ RLProxy Nil }
--- noDefMissing = insert
-
-noDefNotMissing ∷ { tl ∷ RLProxy (Cons "field" (C NoDbDefault Int) Nil), il ∷ RLProxy (Cons "field" Int Nil) }
-noDefNotMissing = insert
-
--- autoNotMissing ∷ { tl ∷ RLProxy (Cons "field" (C (DbAuto Int)) Nil), il ∷ RLProxy (Cons "field" Int Nil) }
--- autoNotMissing = insert
-
-singleAutoMissing ∷ { tl ∷ RLProxy (Cons "field" (C DbAuto Int) Nil), il ∷ RLProxy Nil }
-singleAutoMissing = insert
-
-mixed
-  ∷ { tl ∷ RLProxy
-        ( Cons "field1" (C DbAuto Int)
-        ( Cons "field2" (C DbDefault Int)
-        ( Cons "field3" (C NoDbDefault (Maybe Int))
-        ( Cons "field4" (C NoDbDefault Int)
-          Nil
-        ))))
-    , il ∷ RLProxy
-        ( Cons "field3" (Maybe Int)
-        ( Cons "field4" Int
-          Nil
-        ))
-    }
-mixed = insert
+class Insert (tl ∷ RowList) (il ∷ RowList)
+instance insertNil ∷ Insert Nil Nil
+instance a_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault a) tl) (Cons name a il)
+instance b_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C DbDefault a) tl) il
+instance c_insertNoDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault a) tl) (Cons name a il)
+instance d_insertDbDefault ∷ (Insert tl il) ⇒ Insert (Cons name (C NoDbDefault (Maybe a)) tl) il
+instance e_insertNoDbDefaultCons ∷ (Insert tl il) ⇒ Insert (Cons name (C DbAuto a) tl) il
 
 class InsertRow (il ∷ RowList) (i ∷ # Type) where
   insertRow ∷ RLProxy il → Record i → State (InsertContext String) Unit
@@ -673,10 +589,34 @@ insertContext =
 fromColName :: String -> String
 fromColName cn = "\"" <> escapeQuotes cn <> "\""
 
-compInsert ∷ ∀ i il t tl. RowToList t tl ⇒ RowToList i il ⇒ Insert tl il ⇒ InsertCols il ⇒ InsertRow il i ⇒ Table t → Array (Record i) → { query ∷ String, params∷ Array Foreign } -- (Text, [Param])
-compInsert (Table name) i = { query, params }
+data LabelS = LabelS
+
+class PlainTable (rl ∷ RowList) (pl ∷ RowList ) | rl → pl
+instance plainTableNil ∷ PlainTable Nil Nil
+instance plainTableCons ∷ (PlainTable tail tail') ⇒ PlainTable (Cons name (C d a) tail) (Cons name a tail')
+
+newtype InsertQuery (result ∷ RowList)
+  = InsertQuery
+    { query ∷ String
+    , params ∷ Array Foreign
+    }
+
+compInsert
+  ∷ ∀ cs i il t tl tl'
+  . RowToList t tl
+  ⇒ PlainTable tl tl'
+  ⇒ InsertCols tl'
+  ⇒ RowToList i il
+  ⇒ Insert tl il
+  ⇒ InsertCols il
+  ⇒ InsertRow il i
+  ⇒ Table t
+  → Array (Record i)
+  → InsertQuery tl'
+compInsert (Table name) i = InsertQuery { query, params }
   where
   il = RLProxy ∷ RLProxy il
+  tblCols = insertColNames (RLProxy ∷ RLProxy tl')
   cols = insertColNames il
   { args, params } = insertContext i
   args' = joinWith ",\n" <<< map (\v -> "(" <> joinWith ", " (reverse v) <> ")") <<< reverse $ args
@@ -686,37 +626,8 @@ compInsert (Table name) i = { query, params }
     , "(" <>  joinWith ", " cols <> ")\n"
     , "VALUES"
     , args'
+    , "RETURNING " <> joinWith "," tblCols <> "\n"
     ]
-
---     -- Build all rows: just recurse over the list of defaults (which encodes
---     -- the # of elements in total as well), building each row, keeping track
---     -- of the next parameter identifier.
---     mkRows n (ps:pss) rts paramss =
---       case mkRow n ps (tableCols tbl) of
---         (n', names, params) → mkRows n' pss (rowText:rts) (params:paramss)
---           where rowText = "(" <> Text.intercalate ", " (reverse names) <> ")"
---     mkRows _ _ rts ps =
---       (reverse rts, reverse $ concat ps)
-
-    -- Build a row: use the NULL/DEFAULT keyword for default rows, otherwise
-    -- use a parameter.
-    -- mkRow n ps names = foldl' mkCols (n, [], []) (zip ps names)
--- 
--- compileInsert ∷ Insert a ⇒ PPConfig → Table a → [a] → [(Text, [Param])]
--- compileInsert _ _ [] =
---   [(empty, [])]
--- compileInsert cfg tbl rows =
---     case ppMaxInsertParams cfg of
---       Nothing → [compInsert cfg tbl rows']
---       Just n  → map (compInsert cfg tbl) (chunk (n `div` rowlen) rows')
---   where
---     rows' = map params rows
---     rowlen = length (head rows')
---     chunk chunksize xs =
---       case splitAt chunksize xs of
---         ([], []) → []
---         (x, [])  → [x]
---         (x, xs') → x : chunk chunksize xs'
 
 allNonOutputColNames ∷ Select → Array String
 allNonOutputColNames (Select sql) = fold
@@ -740,18 +651,6 @@ removeDeadCols live sql =
   Select sql' = keepCols (allNonOutputColNames sql <> live) sql
   live' = allColNames (Select sql')
   noDead = removeDeadCols live'
-  -- x = do
-  --   traceAnyA "\n\nLIVE"
-  --   traceAnyA live
-  --   traceAnyA "\n\nLIVE_PRIM"
-  --   traceAnyA live'
-  --   traceAnyA "\n\nALL_NON_OUTPUT_COL_NAMES"
-  --   traceAnyA (allNonOutputColNames sql)
-  --   traceAnyA "SQL_PRIM"
-  --   traceAnyA sql'
-  --   traceAnyA "SQL"
-  --   traceAnyA sql
-  --   Just 8
 
 keepCols ∷ Array String → Select → Select
 keepCols live (Select s@{ columns }) = Select $ s {columns = filtered}
@@ -794,7 +693,6 @@ sqlFrom cs src restricts = Select
   , limits: Nothing
   -- , distinct = False
   }
-
 
 
 type TableName = String

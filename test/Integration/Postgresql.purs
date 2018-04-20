@@ -16,7 +16,7 @@ import Control.Monad.Eff.Exception (error)
 import Control.Monad.Error.Class (throwError, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.State (runState)
-import Data.Array (all, filter, length, sort, sortBy, take, uncons, zip)
+import Data.Array (all, filter, length, sort, sortBy, take, uncons, zip, (!!))
 import Data.Either (Either(..))
 import Data.Exists (mkExists)
 import Data.Foldable (for_)
@@ -24,11 +24,12 @@ import Data.Foreign (Foreign, toForeign)
 import Data.Leibniz (coerce)
 import Data.List ((:), List(..))
 import Data.Maybe (Maybe(..))
-import Data.Maybe (Maybe(..))
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), fromJust)
+import Data.Maybe (Maybe(..), isNothing)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Newtype (unwrap)
-import Data.Record (get, insert)
+import Data.Record (get)
+import Data.Record as Data.Record
 import Data.Record.Fold (class Fold, class Step)
 import Data.Record.Fold as Data.Record.Fold
 import Data.Traversable (sequence)
@@ -39,9 +40,10 @@ import Database.PostgreSQL (POSTGRESQL, PoolConfiguration, Query(..), Row0(..), 
 import Database.PostgreSQL (class FromSQLValue, class ToSQLRow, Connection, POSTGRESQL, fromSQLValue, toSQLRow, unsafeQuery)
 import Database.PostgreSQL as Postgresql
 import Database.PostgreSQL as Postgresql
-import Database.Selda.Little (class FinalCols, BinOp(..), BinOpExp(..), C, Col(..), DbAuto, Exp(..), JoinType(..), Lit(..), NoDbDefault, Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compInsert, compQuery, count, groupBy, innerJoin, limit, order, ppSql, restrict, runQuery, select, state2sql)
+import Database.Selda.Little (class FinalCols, class Insert, class InsertCols, class InsertRow, class PlainTable, BinOp(..), BinOpExp(..), C, Col(..), DbAuto, Exp(..), InsertQuery(..), JoinType(..), Lit(..), NoDbDefault, Order(..), Param(..), Query(..), Select(..), SomeCol(..), SqlSource(..), Table(..), aggregate, allNamesIn, compInsert, compQuery, count, groupBy, innerJoin, limit, order, ppSql, restrict, runQuery, select, state2sql)
 import Database.Selda.Little as Selda
 import Debug.Trace (traceAnyA)
+import Partial.Unsafe (unsafePartial)
 import Test.Unit (TestSuite, test)
 import Test.Unit (suite) as Test.Unit
 import Test.Unit.Assert (assert, equal)
@@ -85,7 +87,9 @@ rEq r1 r2 =
 
 -- dbSql ∷ String
 dbSql = Postgresql.Query """
-  CREATE TEMPORARY TABLE "orders" (
+  DROP TABLE IF EXISTS orderItem;
+  DROP TABLE IF EXISTS orders;
+  CREATE UNLOGGED TABLE "orders" (
     billingAddress TEXT NOT NULL,
     billingCity TEXT NOT NULL,
     billingCompanyName TEXT,
@@ -96,7 +100,7 @@ dbSql = Postgresql.Query """
     billingPostalCode TEXT NOT NULL,
     id SERIAL PRIMARY KEY
   );
-  CREATE TEMPORARY TABLE orderItem (
+  CREATE UNLOGGED TABLE orderItem (
     orderId INTEGER PRIMARY KEY REFERENCES "orders" UNIQUE,
     invoiceNumber SERIAL UNIQUE NOT NULL,
     invoiceName TEXT NOT NULL,
@@ -135,7 +139,7 @@ instance b_sqlToRecordCons
         Just { head, tail } → do
           h ← fromSQLValue head
           t ← sqlToRecord (RLProxy ∷ RLProxy tail) tail
-          pure (insert _name h t)
+          pure (Data.Record.insert _name h t)
 
 instance c_sqlToRecordCons
   ∷ ( SqlToRecord tail r'
@@ -155,7 +159,7 @@ instance c_sqlToRecordCons
         Just { head, tail } → do
           h ← fromSQLValue head
           t ← sqlToRecord (RLProxy ∷ RLProxy tail) tail
-          pure (insert _name h t)
+          pure (Data.Record.insert _name h t)
 
 class SqlToResult i o | i → o where
   sqlToResult ∷ Proxy i → Array Foreign → Either String o
@@ -211,14 +215,13 @@ orders' ∷ Table
   )
 orders' = Table "orders"
 
-class PlainTable (rl ∷ RowList) (pl ∷ RowList ) | rl → pl
-instance plainTableNil ∷ PlainTable Nil Nil
-instance plainTableCons ∷ (PlainTable tail tail') ⇒ PlainTable (Cons name (C d a) tail) (Cons name a tail')
 
 plain ∷ ∀ p pl r rl. RowToList r rl ⇒ PlainTable rl pl ⇒ ListToRow pl p ⇒ Table r → Table p
 plain (Table n) = Table n
 
 orders = plain orders'
+
+-- foreign import debugger ∷ ∀ eff. Eff eff Unit
 
 
 -- | XXX: Read config file from env
@@ -240,6 +243,28 @@ and (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (And { i: id, o
 lInt x = Col (Literal (LInt x id))
 lStr x = Col (Literal (LString x id))
 
+
+runInsert ∷ ∀ r rl. SqlToRecord rl r ⇒ Connection → InsertQuery rl → Aff _ (Array {|r})
+runInsert conn (InsertQuery { query, params }) = do
+  unsafeQuery conn query params
+    >>= traverse (sqlToRecord (RLProxy ∷ RLProxy rl) >>> case _ of
+      Right row → pure row
+      Left  msg → throwError (error msg))
+
+insert ∷ forall t262 t263 t264 t265 t267 t268 t269. RowToList t263 t262 => PlainTable t262 t268 => InsertCols t268 => RowToList t265 t264 => Insert t262 t264 => InsertCols t264 => InsertRow t264 t265 => SqlToRecord t268 t269 => Connection -> Table t263 -> Array { | t265 } -> Aff ( postgreSQL :: POSTGRESQL | t267 ) (Array { | t269 })
+insert conn table rows =
+  let
+    insertQuery = compInsert table rows
+  in
+    runInsert conn insertQuery
+
+insertSingle ∷ forall t262 t263 t264 t265 t267 t268 t269. RowToList t263 t262 => PlainTable t262 t268 => InsertCols t268 => RowToList t265 t264 => Insert t262 t264 => InsertCols t264 => InsertRow t264 t265 => SqlToRecord t268 t269 => Connection -> Table t263 -> { | t265 } -> Aff ( postgreSQL :: POSTGRESQL | t267 ) { | t269 }
+insertSingle conn table row =
+  let
+    insertQuery = compInsert table [row]
+  in
+    unsafePartial $ (\arr → fromJust (arr !! 0)) <$> runInsert conn insertQuery
+
 suite
   ∷ ∀ t26.
    Aff
@@ -255,12 +280,20 @@ suite = do
   withConnection pool \conn → do
     execute conn dbSql Row0
     let
+      singleOrder =
+        { billingAddress: "Piastowska"
+        , billingCity: "Gubin"
+        , billingCompanyName: "plintel-z"
+        , billingCompanyTaxId: "8861577777"
+        , billingFullName: "Gościsław B"
+        , billingHomeNumber: "2"
+        , billingPostalCode: "88-260"
+        }
       initialOrders =
         [ { billingAddress: "Piastowska"
           , billingCity: "Gubin"
           , billingCompanyName: "plintel-z"
           , billingCompanyTaxId: "8861577777"
-          , billingFlatNumber: Nothing
           , billingFullName: "Gościsław B"
           , billingHomeNumber: "2"
           , billingPostalCode: "88-260"
@@ -269,7 +302,6 @@ suite = do
           , billingCity: "Gubin"
           , billingCompanyName: "fingerbimber"
           , billingCompanyTaxId: "886157999"
-          , billingFlatNumber: Nothing
           , billingFullName: "Rymasz Tomarczyk"
           , billingHomeNumber: "20"
           , billingPostalCode: "88-260"
@@ -278,33 +310,39 @@ suite = do
           , billingCity: "Osesek"
           , billingCompanyName: "bimberbau"
           , billingCompanyTaxId: "92615777"
-          , billingFlatNumber: Nothing ∷ Maybe String
           , billingFullName: "Tymasz Romarczyk"
           , billingHomeNumber: "88"
           , billingPostalCode: "66-666"
           }
         ]
     let
-      { query, params } = compInsert orders' initialOrders
+      insertQuery = compInsert orders' initialOrders
+      insertOrders = runInsert conn insertQuery
 
     liftEff $ runTest $ do
       Test.Unit.suite "Integration.Postgresql" $ do
         Test.Unit.suite "single table" $ do
           test "select all rows" $ do
             withRollback conn do
-              _ ← unsafeQuery conn query params
+              void $ insert conn orders' initialOrders
               let
                 allOrders = select orders
               rows ← run conn allOrders
               equal (length rows) (length initialOrders)
+              -- liftEff debugger
               assert
                 "all rows found"
                 (all (\(Tuple o1 o2) → rEq o1 o2)
                   (zip initialOrders (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
+              assert
+                "fetches null values too"
+                (all (\r → isNothing r.billingFlatNumber) rows)
+              -- s ← insertSingle conn orders' singleOrder
+              -- traceAnyA s
 
           test "restricting by simple prediate" $ do
             withRollback conn $ do
-              _ ← unsafeQuery conn query params
+              void $ insert conn orders' initialOrders
               let
                 gubin = "Gubin"
                 ordersFromGubin = do
@@ -322,7 +360,7 @@ suite = do
                   (zip expected (sortBy (\o1 o2 → o1.id `compare` o2.id) rows)))
           test "ordering by single column" $ do
             withRollback conn $ do
-              _ ← unsafeQuery conn query params
+              void $ insert conn orders' initialOrders
               ids ← run conn $ do
                 o ← select orders
                 pure o.id
@@ -342,7 +380,7 @@ suite = do
               equal (sortBy (flip compare) ids) rowsD
           test "limiting" $ do
             withRollback conn $ do
-              _ ← unsafeQuery conn query params
+              void $ insert conn orders' initialOrders
               ids ← run conn $ do
                 o ← select orders
                 pure o.id
@@ -360,7 +398,6 @@ suite = do
 
               rows2 ← run conn q2
               equal (take 2 $ sort ids) rows2
-
 
 withRollback conn action = do
   execute conn (Postgresql.Query "BEGIN TRANSACTION") Row0
