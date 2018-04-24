@@ -57,9 +57,9 @@ import Unsafe.Coerce (unsafeCoerce)
 
 -- dbSql ∷ String
 dbSql = Postgresql.Query """
-  DROP TABLE IF EXISTS orderItem;
-  DROP TABLE IF EXISTS orders;
-  CREATE UNLOGGED TABLE "orders" (
+  DROP TABLE IF EXISTS "OrderItem";
+  DROP TABLE IF EXISTS "Order";
+  CREATE UNLOGGED TABLE "Order" (
     billingAddress TEXT NOT NULL,
     billingCity TEXT NOT NULL,
     billingCompanyName TEXT,
@@ -70,11 +70,9 @@ dbSql = Postgresql.Query """
     billingPostalCode TEXT NOT NULL,
     id SERIAL PRIMARY KEY
   );
-  CREATE UNLOGGED TABLE orderItem (
-    orderId INTEGER PRIMARY KEY REFERENCES "orders" UNIQUE,
-    invoiceNumber SERIAL UNIQUE NOT NULL,
-    invoiceName TEXT NOT NULL,
-    invoiceRaised TIMESTAMP WITH TIME ZONE NOT NULL
+  CREATE UNLOGGED TABLE "OrderItem" (
+    productId INTEGER NOT NULL,
+    orderId INTEGER PRIMARY KEY REFERENCES "Order"
   );
 """
 
@@ -183,7 +181,7 @@ orders' ∷ Table
   , billingPostalCode :: C NoDbDefault String
   , id ∷ C DbAuto Int
   )
-orders' = Table "orders"
+orders' = Table { name: "Order" }
 
 
 plain ∷ ∀ p pl r rl. RowToList r rl ⇒ PlainTable rl pl ⇒ ListToRow pl p ⇒ Table r → Table p

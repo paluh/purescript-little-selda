@@ -37,13 +37,13 @@ import Unsafe.Coerce (unsafeCoerce)
 
 
 people ∷ Table (firstName ∷ String, lastName ∷ String, age ∷ Int, id ∷ Int)
-people = Table "people"
+people = Table { name: "people" }
 
 favoriteVegs ∷ Table (peopleId ∷ Int, vegsId ∷ Int)
-favoriteVegs = Table "favoriteVegs"
+favoriteVegs = Table { name: "favoriteVegs" }
 
 vegs ∷ Table (colour ∷ String, weight ∷ Int, name ∷ String, id ∷ Int)
-vegs = Table "vegs"
+vegs = Table { name: "vegs" }
 
 gt (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (Gt { cmp: (>) , o: id }) e1 $ e2
 lt (Col e1) (Col e2) = Col $ BinaryOp <<< mkExists <<< BinOpExp (Lt { cmp: (<) , o: id }) e1 $ e2
@@ -155,7 +155,7 @@ order ∷ Table
   -- Why String?
   , id ∷ Int
   )
-order = Table "orders"
+order = Table { name: "orders" }
 
 pLit ∷ ∀ a. Lit a → a
 pLit (LInt v f) = coerce f v

@@ -11,7 +11,7 @@ import Data.Leibniz (type (~))
 import Data.Maybe (Maybe(..), isNothing, maybe)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Record as Data.Record
-import Data.String (joinWith)
+import Data.String (Pattern(..), Replacement(..), joinWith, replace)
 import Data.Traversable (for, sequence, traverse)
 import Data.Tuple (Tuple(..))
 import Database.PostgreSQL (null)
@@ -21,7 +21,7 @@ import Type.Proxy (Proxy(..))
 import Type.Row (class ListToRow, Cons, Nil, kind RowList)
 import Unsafe.Coerce (unsafeCoerce)
 
-data Table (r ∷ # Type) = Table String
+data Table (r ∷ # Type) = Table { name ∷ String }
 
 type Scope = Int
 type Ident = Int
@@ -215,7 +215,7 @@ select
   ⇒ Rename s tcl tc r
   ⇒ Table c
   → Query s (Record r)
-select (Table name) = do
+select (Table { name }) = do
   let tc = tableCols (Proxy ∷ Proxy s) (RLProxy ∷ RLProxy cl)
   { result, cols } ← renameImpl (RLProxy ∷ RLProxy tcl) tc
   st ← Query get
@@ -610,7 +610,7 @@ compInsert
   ⇒ Table t
   → Array (Record i)
   → InsertQuery tl'
-compInsert (Table name) i = InsertQuery { query, params }
+compInsert (Table { name }) i = InsertQuery { query, params }
   where
   il = RLProxy ∷ RLProxy il
   tblCols = insertColNames (RLProxy ∷ RLProxy tl')
@@ -619,7 +619,7 @@ compInsert (Table name) i = InsertQuery { query, params }
   args' = joinWith ",\n" <<< map (\v -> "(" <> joinWith ", " (reverse v) <> ")") <<< reverse $ args
   query = joinWith "\n"
     [ "INSERT INTO"
-    , name
+    , fromColName name
     , "(" <>  joinWith ", " cols <> ")\n"
     , "VALUES"
     , args'
@@ -736,7 +736,7 @@ ppSomeCol (Named n c) = do
 
 -- | Escape double quotes in an SQL identifier.
 escapeQuotes ∷ String → String
-escapeQuotes = id -- replace (Pattern "\"") "\"\""
+escapeQuotes = replace (Pattern "\"") (Replacement "\"\"")
 
 ppCol ∷ ∀ a. Exp Select a → PP String
 ppCol (TableCol xs) = unsafeCrashWith $ "Selda: compiler bug: ppCol saw TableCol..."
@@ -814,7 +814,7 @@ ppSql (Select q) = do
 
   ppSrc (TableName n)  = do
     dependOn n
-    pure $ " FROM " <> n
+    pure $ " FROM " <> fromColName n
   ppSrc (Product [])   = do
     pure ""
   ppSrc (Product sqls) = do
