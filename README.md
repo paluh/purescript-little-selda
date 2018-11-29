@@ -4,7 +4,7 @@
 
 So just go directly to [purescript-selda](https://github.com/Kamirus/purescript-selda) !
 
-This prototype was "literal port" of selda. It has nearly accomplished its mission as it had proven that we can use PureScript records to build queries and rows to represent tables.
+This prototype was a "literal port" of selda. It has nearly accomplished its mission as it had proven that we can use PureScript records to build queries and rows to represent tables.
 
 It can rest in peace now.
 
