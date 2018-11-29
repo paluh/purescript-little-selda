@@ -1,4 +1,16 @@
-# purescript-little-selda
+# purescript-little-selda ... is dead!
+
+## Long live the purescript-selda!
+
+So just go directly to [purescript-selda](https://github.com/Kamirus/purescript-selda) !
+
+This prototype was "literal port" of selda. It has nearly accomplished its mission as it had proven that we can use PureScript records to build queries and rows to represent tables.
+
+It can rest in peace now.
+
+Kamirus implementation is a complately new attempt with clear design and nicer API :-)
+
+## About
 
 An attempt to port Haskell Selda to Purescript. Pre-α stage.
 
